@@ -24,6 +24,16 @@ if(NOT MR_XCRUN)
   return()
 endif()
 
+# mrmetal3 is only defined when metal/mr_backend_metal3.m exists, and the Metal
+# backend it builds is the thing under test. Checking before anything is created
+# means a machine without the backend gets no half-built target, rather than a
+# target that fails to link later.
+if(NOT TARGET mrmetal3)
+  message(STATUS "Mr: skipping mr_metal_test (the Metal backend target does not "
+                 "exist yet)")
+  return()
+endif()
+
 # The host SDK, so the same test can run on macOS CI and, later, on device with
 # an iphoneos sysroot. DXMT's iOS port needed exactly this switch, and it is
 # cheaper to have one variable than one edit.
@@ -53,9 +63,14 @@ add_custom_command(
   COMMENT "Linking the test shaders into a metallib"
   VERBATIM)
 
-add_executable(mr_metal_test mr_metal_test.m)
-add_dependencies(mr_metal_test mr_metallib)
 add_custom_target(mr_metallib DEPENDS ${MR_METAL_LIB})
+
+add_executable(mr_metal_test mr_metal_test.m)
+
+# The metallib is built first, so the path can be passed as an argument. Without
+# the dependency the test would start before the shaders existed and fail for a
+# reason that has nothing to do with the backend.
+add_dependencies(mr_metal_test mr_metallib)
 
 target_include_directories(mr_metal_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../../runtime/include
@@ -63,15 +78,6 @@ target_include_directories(mr_metal_test PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/../..)
 
 target_compile_options(mr_metal_test PRIVATE -fno-objc-arc)
-
-# mrmetal3 is only defined when metal/mr_backend_metal3.m exists, and the Metal
-# backend it builds is the thing under test. If it is missing there is nothing to
-# test, and configure already said so.
-if(NOT TARGET mrmetal3)
-  message(STATUS "Mr: skipping mr_metal_test (the Metal backend target does not "
-                 "exist yet)")
-  return()
-endif()
 
 target_link_libraries(mr_metal_test PRIVATE
   mrmetal3 mrcore mr_warnings

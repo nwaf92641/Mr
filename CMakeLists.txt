@@ -11,6 +11,24 @@ include(mr-toolchain-guard)
 mr_assert_supported_arch()
 mr_can_build_apple_layers(MR_APPLE_LAYERS_DEFAULT)
 
+# Objective-C is enabled only on Apple, and it has to be enabled here rather than
+# left to CMake's own discovery.
+#
+# On the arm64 macOS runner this failed at the generate step with "Missing
+# variable is: CMAKE_OBJC_COMPILE_OBJECT". The project declared LANGUAGES C, the
+# metal target added a .m file, and CMake brought the OBJC language up lazily to
+# cover it -- far enough to run the compiler probe ("Detecting OBJC compiler ABI
+# info - done") but not far enough to load the rules that turn a .m into an
+# object. Enabling the language explicitly, before any target exists, is what
+# loads them.
+#
+# Not on Linux: there is normally no Objective-C compiler there at all, and
+# asking for one would fail the configure before cmake/mr-toolchain-guard.cmake
+# got to explain that the Apple layers are the part being skipped.
+if(APPLE)
+  enable_language(OBJC)
+endif()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
