@@ -63,6 +63,29 @@ Wine: the D3D11 entry points are now linkable by an ordinary macOS program.
 paravirtual and reports no GPU families, so it could not render if it tried.
 `REQUIRES REAL APPLE GPU VALIDATION`.
 
+## An integration requirement the native build exposed
+
+DXMT's native build links against **LLVM's libc++, not the system one**, and
+records it as `@rpath/libc++.1.dylib`. The cause is internal to DXMT:
+`src/airconv/darwin/meson.build` sets `llvm_ld_flags_darwin` to include
+`-L<native_llvm_path>/lib`, and `airconv_dep_darwin` propagates those link args to
+anything linking airconv, which includes `winemetal`. So `winemetal.dylib` takes
+its `libc++` from the LLVM directory.
+
+Observed as `dyld: Library not loaded: @rpath/libc++.1.dylib, Referenced from:
+winemetal.dylib` -- which is how the first attempt to run anything at all failed
+in CI, before a single line of the test executed.
+
+This is not a CI curiosity. It is a packaging requirement to be answered before an
+iPadOS build, where an rpath into a build directory does not exist:
+
+- ship LLVM's `libc++` / `libc++abi` / `libunwind` alongside the runtime, or
+- build DXMT against the system libc++, or
+- patch the link flags, which is the option needing the strongest reason.
+
+Recorded now because the iPadOS build is where it turns from an environment
+variable into a shipped decision.
+
 ## Stages, and what each one is allowed to claim
 
 Each stage claims exactly one level and no more. The levels are defined in
