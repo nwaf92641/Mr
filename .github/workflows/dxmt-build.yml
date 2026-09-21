@@ -160,7 +160,7 @@ jobs:
           DXMT_SRC: ${{ runner.temp }}/dxmt
         run: |
           set -euo pipefail
-          found=$(find "$DXMT_SRC/build" -name 'winemetal.dylib' | head -1)
+          found=$(find "$DXMT_SRC/build" -name 'winemetal.dylib' -print -quit)
           if [ -z "$found" ]; then
             echo "::error::DXMT built but produced no winemetal.dylib, so its Metal layer is not in the output. See third_party/README.md and docs/dxmt-integration.md."
             exit 1
@@ -171,14 +171,24 @@ jobs:
       # A D3D11 entry point that is not exported cannot be linked by an ordinary
       # macOS program, and the probe below depends on exactly that. Checked with
       # nm rather than assumed from the fact that the file exists.
+      #
+      # The output is captured and matched in the shell rather than piped into
+      # `grep -q`. Under `set -o pipefail`, `grep -q` exiting on its first match
+      # gives nm a SIGPIPE, nm's non-zero death becomes the pipeline's status, and
+      # a symbol that is present is reported as absent. That is exactly how this
+      # check failed the first time it ran, with `T _D3D11CreateDevice` printed
+      # in the very next line.
       - name: The D3D11 entry point is exported
         env:
           DXMT_SRC: ${{ runner.temp }}/dxmt
         run: |
           set -euo pipefail
-          if ! nm -gU "$DXMT_SRC/build/src/d3d11/d3d11.dylib" | grep -qE ' _D3D11CreateDevice$'; then
+          exports=$(nm -gU "$DXMT_SRC/build/src/d3d11/d3d11.dylib")
+          if [[ "$exports" != *"T _D3D11CreateDevice"* ]]; then
             echo "::error::d3d11.dylib does not export D3D11CreateDevice, so nothing can link it"
-            nm -gU "$DXMT_SRC/build/src/d3d11/d3d11.dylib" | grep -i d3d11create || true
+            while IFS= read -r line; do
+              [[ "$line" == *D3D11CreateDevice* ]] && echo "$line"
+            done <<< "$exports"
             exit 1
           fi
           echo "D3D11CreateDevice: exported by d3d11.dylib"
