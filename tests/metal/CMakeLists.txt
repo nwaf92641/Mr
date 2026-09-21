@@ -80,7 +80,11 @@ target_include_directories(mr_metal_test PRIVATE
 target_compile_options(mr_metal_test PRIVATE -fno-objc-arc)
 
 target_link_libraries(mr_metal_test PRIVATE
-  mrmetal3 mrcore mr_warnings
+  # mrcore brings mrmetal3 with it: the top-level links whichever backend exists
+  # into mrcore PUBLIC, because mrcore is what declares the factory that calls it.
+  # Listing it here as well made ld say "ignoring duplicate libraries" on every
+  # Apple build.
+  mrcore mr_warnings
   "-framework Metal" "-framework Foundation" "-framework QuartzCore")
 
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
