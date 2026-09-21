@@ -124,6 +124,16 @@ enum {
   MTLResourceUsageSample = 1 << 2,
 };
 
+typedef NSUInteger MTLRenderStages;
+
+enum {
+  MTLRenderStageVertex = 1 << 0,
+  MTLRenderStageFragment = 1 << 1,
+  MTLRenderStageTile = 1 << 2,
+  MTLRenderStageObject = 1 << 3,
+  MTLRenderStageMesh = 1 << 4,
+};
+
 enum {
   MTLCommandBufferStatusNotEnqueued = 0,
   MTLCommandBufferStatusEnqueued = 1,
@@ -240,7 +250,18 @@ enum {
 @protocol MTLComputePipelineState <NSObject>
 @end
 
-@protocol MTLRenderCommandEncoder <NSObject>
+/* The label is here, not on the encoders and not on the pass descriptor. That
+ * distinction is the one the real SDK enforced: this stub previously put a label
+ * on MTLRenderPassDescriptor, the backend believed it, and the first Apple build
+ * of metal/mr_backend_metal3.m failed with "property 'label' not found on object
+ * of type 'MTLRenderPassDescriptor *'". */
+@protocol MTLCommandEncoder <NSObject>
+- (NSString *)label;
+- (void)setLabel:(NSString *)label;
+- (void)endEncoding;
+@end
+
+@protocol MTLRenderCommandEncoder <MTLCommandEncoder>
 - (void)setRenderPipelineState:(id<MTLRenderPipelineState>)pipelineState;
 - (void)setVertexBuffer:(id<MTLBuffer>)buffer
                  offset:(NSUInteger)offset
@@ -254,7 +275,12 @@ enum {
                       atIndex:(NSUInteger)index;
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)sampler
                         atIndex:(NSUInteger)index;
-- (void)useResource:(id<MTLResource>)resource usage:(MTLResourceUsage)usage;
+- (void)useResource:(id<MTLResource>)resource
+              usage:(MTLResourceUsage)usage
+             stages:(MTLRenderStages)stages;
+- (void)useResource:(id<MTLResource>)resource
+              usage:(MTLResourceUsage)usage
+    __attribute__((deprecated("Use useResource:usage:stages: instead")));
 - (void)useHeap:(id<MTLHeap>)heap;
 - (void)drawPrimitives:(MTLPrimitiveType)primitiveType
            vertexStart:(NSUInteger)vertexStart
@@ -268,7 +294,7 @@ enum {
 - (void)endEncoding;
 @end
 
-@protocol MTLBlitCommandEncoder <NSObject>
+@protocol MTLBlitCommandEncoder <MTLCommandEncoder>
 - (void)copyFromTexture:(id<MTLTexture>)sourceTexture
               toTexture:(id<MTLTexture>)destinationTexture;
 - (void)endEncoding;

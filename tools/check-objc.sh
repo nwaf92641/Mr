@@ -30,7 +30,11 @@ fi
 
 # The same warning set the CMake build uses for these files, so a pass here means
 # a pass there as far as the warnings go.
+# -Werror on purpose. The real targets build with it, and without it here a
+# deprecation is a warning that scrolls past and a broken CI run: that is exactly
+# how useResource:usage: reached the arm64 runner.
 WARNINGS=(
+  -Werror
   -Wall -Wextra -Wpedantic
   -Wconversion -Wsign-conversion -Wshadow -Wcast-qual -Wstrict-prototypes
   -Wmissing-prototypes -Wdouble-promotion -Wformat=2 -Wundef

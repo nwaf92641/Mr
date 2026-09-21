@@ -36,3 +36,22 @@ tools/check-objc.sh
 
 The honest summary is "well-formed", not "works". The Mac is still the only
 place that can say the second thing.
+
+## What the stubs learned from the first real Apple build
+
+These stubs are not just declarations any more. The first arm64 macOS build of
+the Metal backend failed on things this directory had wrong or missing, and each
+one was folded back in so the next occurrence is caught here instead:
+
+- `MTLTextureDescriptor` and `MTLRenderPassDescriptor` have no `label`.
+  `MTLCommandEncoder` does, and both encoder protocols refine it.
+- `useResource:usage:` is deprecated from macOS 13 / iOS 16 and the project
+  builds with `-Werror`, so the stub marks it deprecated exactly as Apple does.
+  `check-objc.sh` now passes `-Werror` too, because without it that deprecation
+  was a warning that scrolled past and a failed CI run.
+- `MTLRenderStages` and its `MTLRenderStageVertex` / `MTLRenderStageFragment`
+  values exist.
+
+The rule that follows: when a real Apple SDK rejects something, fix the stub in
+the same commit. A stub that is friendlier than the SDK is worse than no stub,
+because it reports success for code that cannot build.

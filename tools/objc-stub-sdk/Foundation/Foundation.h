@@ -44,6 +44,7 @@ typedef double CGFloat;
 
 @interface NSString : NSObject
 + (instancetype)stringWithUTF8String:(const char *)bytes;
++ (instancetype)stringWithFormat:(NSString *)format, ...;
 - (const char *)UTF8String;
 - (NSUInteger)length;
 @end
