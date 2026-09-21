@@ -9,6 +9,24 @@
 #if !defined(_WIN32)
 /* Must precede every system header; see the note in mr_util.c. */
 #define _POSIX_C_SOURCE 200809L
+
+/*
+ * ...and Darwin hides its BSD extensions when that macro is in force, which
+ * includes MAP_ANON. _DARWIN_C_SOURCE is Apple's documented way to ask for them
+ * back, and it has to be in the same place as the macro above: before the first
+ * system header.
+ *
+ * Two CI runs were spent learning this. The first stopped at
+ *
+ *   mr_host.c:219:34: error: use of undeclared identifier 'MAP_ANONYMOUS'
+ *
+ * and the obvious fix -- fall back to MAP_ANON, which is the BSD spelling -- got
+ * exactly the same error, because under _POSIX_C_SOURCE this SDK defines
+ * neither. Falling back between two names that are both hidden is not a fix.
+ */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 #endif
 
 #include "mr/mr_host.h"
