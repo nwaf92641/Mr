@@ -23,6 +23,46 @@ Toolchain and platform are recorded by the CI job itself rather than asserted
 here, because a document cannot know what a runner had. The values are in the
 `dxmt-build-evidence` artifact.
 
+## Evidence from the first successful build
+
+Recorded by the job, copied here from its log. Run
+[35664608244](https://github.com/nwaf92641/Mr/actions/runs/35664608244), commit
+`33d61f40`, job `DXMT on Apple Silicon`.
+
+| | |
+| --- | --- |
+| runner | `macos-15`, arm64 |
+| OS | macOS 15.7.9 |
+| Xcode | 16.4 (build 16F6) |
+| Apple clang | 17.0.0 (clang-1700.0.13.5) |
+| SDK | 15.5 |
+| LLVM | 15.0.7, official arm64 prebuilt |
+| `meson compile` | 93 seconds |
+| commands | `meson setup build --buildtype release -Dnative_llvm_path=$LLVM_ROOT`, then `meson compile -C build` |
+
+What it produced, every one of them `Mach-O 64-bit dynamically linked shared
+library arm64` where it is a library:
+
+| Artifact | What it is |
+| --- | --- |
+| `src/d3d11/d3d11.dylib` | the D3D11 entry points |
+| `src/dxgi/dxgi.dylib` | DXGI |
+| `src/d3d10/d3d10core.dylib` | D3D10 core |
+| `src/nativemetal/winemetal.dylib` | the Metal layer, and the artifact the job asserts exists |
+| `src/dxmt/libdxmt.a` | the D3D11-to-Metal translation |
+| `src/dxmt/libdxmt.a.p/dxmt_command.metallib` | DXMT's own Metal shaders, compiled by Apple's Metal compiler |
+| `libs/DXBCParser/libDXBCParser{,Native}.a`, `src/airconv/darwin/libairconv.a`, `src/util/libutil.a` | the DXBC parser, the DXBC-to-AIR translator, and shared utilities |
+
+Two things worth reading off that list. The `.metallib` means DXMT's Metal shader
+source compiled at build time with the real Metal compiler, so that path is not
+merely declared. And `d3d11.dylib` existing is what makes stage 3 possible without
+Wine: the D3D11 entry points are now linkable by an ordinary macOS program.
+
+**This is BUILD VERIFIED and nothing more.** Nothing has called
+`D3D11CreateDevice`. Nothing has created a `CAMetalLayer`. The runner's GPU is
+paravirtual and reports no GPU families, so it could not render if it tried.
+`REQUIRES REAL APPLE GPU VALIDATION`.
+
 ## Stages, and what each one is allowed to claim
 
 Each stage claims exactly one level and no more. The levels are defined in
@@ -30,7 +70,7 @@ Each stage claims exactly one level and no more. The levels are defined in
 
 | Stage | Work | Level it can reach | State |
 | --- | --- | --- | --- |
-| 1 | DXMT builds on arm64 macOS | BUILD VERIFIED | in progress, PR #3 |
+| 1 | DXMT builds on arm64 macOS | BUILD VERIFIED | **done**, run 35664608244 |
 | 2 | Wine ARM64EC loads DXMT's path | BUILD VERIFIED, then INSTALL/RUNTIME on hardware | not started |
 | 3 | `D3D11CreateDevice` returns a device and context | RUNTIME VERIFIED on a Mac | not started |
 | 4 | A triangle through DXMT into a readback buffer | REAL APPLE GPU VERIFIED | not started |
