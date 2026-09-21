@@ -115,6 +115,11 @@ if(APPLE AND MR_TARGET_ARM64)
   add_subdirectory(metal4)
 endif()
 
+# The Metal backend's test lives outside tests/c because it needs an Apple SDK
+# and a GPU, neither of which the portable suite may depend on. The directory
+# returns early everywhere else and says why.
+add_subdirectory(tests/metal)
+
 message(STATUS "Mr ${PROJECT_VERSION}")
 message(STATUS "  build type ......... ${CMAKE_BUILD_TYPE}")
 message(STATUS "  host processor ..... ${CMAKE_SYSTEM_PROCESSOR}")
