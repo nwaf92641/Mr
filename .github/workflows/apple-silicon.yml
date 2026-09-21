@@ -1,0 +1,85 @@
+# Apple Silicon CI.
+#
+# This workflow exists because the development host is Linux, and Linux cannot
+# compile Objective-C, cannot link Metal, and cannot run a single line of the
+# graphics backend. Without this job, every claim about the Apple platform layer
+# would be a claim about source code rather than about a binary, and the project's
+# whole position is that those are different things.
+#
+# macos-15 is an arm64 runner, which matters beyond Metal: the top-level
+# CMakeLists refuses to configure on an Intel Mac at all, so an x86_64 runner
+# would fail at step one for a reason that is intended.
+#
+# A runner is a VM with a paravirtualised GPU. If it exposes no Metal device the
+# test says so and reports UNVERIFIED for everything that needs one, rather than
+# failing; a machine without a GPU cannot make a claim about a GPU backend. What
+# that costs is that this job proves the Apple code *compiles and links* even
+# when it cannot run, which is still the largest single gap it can close.
+
+name: Apple Silicon
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Printed before anything can fail, because every later failure is easier
+      # to read with the toolchain versions above it.
+      - name: Toolchain
+        run: |
+          sw_vers
+          uname -m
+          xcodebuild -version
+          xcrun --version
+          cmake --version
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # The portable suite runs here too. It is the same suite that runs on
+      # Linux, and running it on the target architecture is the cheapest way to
+      # catch anything that depends on long, pointer width or byte order.
+      - name: Portable test suite
+        run: ctest --test-dir build --output-on-failure
+
+      # The Metal backend test, run directly rather than through ctest so its
+      # per-question output reaches the log whether it passes or fails.
+      #
+      # Exit 77 is the test saying the machine cannot answer its questions, which
+      # is what GitHub's own arm64 runners do: their Metal device is paravirtual
+      # and reports no GPU families, so there is nothing to draw on. That is not a
+      # reason to fail the job, and it is emphatically not a reason to pass it
+      # quietly -- hence the ::warning::, which shows up on the run as an
+      # annotation rather than scrolling past in a log nobody reads.
+      - name: Metal backend test
+        run: |
+          set -o pipefail
+          set +e
+          ./build/tests/metal/mr_metal_test \
+            ./build/tests/metal/triangle.metallib | tee /tmp/metal-test.log
+          status=$?
+          if [ "$status" -eq 77 ]; then
+            echo "::warning title=Metal frame path unverified::This runner has no usable Metal device, so the Metal backend was built and linked but its frame path was not exercised. A Mac or an iPad is needed to verify it."
+            exit 0
+          fi
+          exit "$status"
+
+      - name: Upload the Metal test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metal-test-log
+          path: /tmp/metal-test.log
+          if-no-files-found: warn

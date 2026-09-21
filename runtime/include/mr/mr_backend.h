@@ -1,11 +1,36 @@
 /*
  * The graphics backend ABI.
  *
- * This is the contract between DXMT's Unix-side Metal layer (winemetal) and the
- * Metal implementation underneath it. Only one ABI exists, and it is shaped by
- * Metal 4 rather than by Metal 3, because the two Metal generations differ in
- * ways that cannot be hidden at the call site without giving up what Metal 4 is
- * for:
+ * Read this first: it is a test and conformance interface, not the runtime's
+ * frame path.
+ *
+ * It was written as the contract between DXMT's Unix-side Metal layer and the
+ * Metal implementation underneath it, so that a Mr Metal backend could sit
+ * between the two. Reading DXMT's source settled that it cannot, and the evidence
+ * is in docs/graphics-path-study.md against upstream 3Shain/dxmt 7c8dee1c:
+ *
+ *   - DXMT's unix side calls Metal directly; there is no seam under it to
+ *     implement, only its own body to rewrite.
+ *   - Wine's macdrv creates the MTLDevice and the CAMetalLayer. DXMT never calls
+ *     MTLCreateSystemDefaultDevice. A backend here would own a second device that
+ *     cannot share resources with, or present through, Wine's layer.
+ *   - DXMT already has two Metal abstractions, WMT:: in Metal.hpp and src/dxmt/.
+ *     A third would duplicate one of them and put a dispatch in front of every
+ *     draw.
+ *
+ * So Metal 4 is implemented inside DXMT, as a patch series. This header keeps the
+ * job it is actually good at: letting a test exercise a Metal frame path with no
+ * Wine, no FEX and no DXMT in the way, so a failure is attributable to one layer.
+ * metal/mr_backend_metal3.m draws into its own texture for exactly that reason.
+ *
+ * The reasoning below about the ABI being shaped by Metal 4 rather than Metal 3
+ * still stands. It is now DXMT's problem rather than a layer boundary's, which is
+ * the better place for it: the costs it describes are paid inside the component
+ * that owns the D3D11 semantics.
+ *
+ * Only one ABI exists, and it is shaped by Metal 4 rather than by Metal 3,
+ * because the two Metal generations differ in ways that cannot be hidden at the
+ * call site without giving up what Metal 4 is for:
  *
  *   Metal 3                              Metal 4
  *   -----------------------------------  -------------------------------------
@@ -37,8 +62,9 @@
  * choosing Metal 4 is a capability decision made once, in mr_host_pick_backend,
  * rather than an #ifdef spread across the renderer.
  *
- * Handles, not pointers: everything crossing into this ABI from the PE side of
- * DXMT crosses a Windows/Unix boundary where a host pointer is meaningless.
+ * Handles, not pointers: this ABI was designed to be crossed from a PE side,
+ * where a host pointer is meaningless, and the test binary and a future in-Wine
+ * caller both keep that property.
  */
 #ifndef MR_BACKEND_H
 #define MR_BACKEND_H

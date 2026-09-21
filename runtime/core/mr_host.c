@@ -9,6 +9,24 @@
 #if !defined(_WIN32)
 /* Must precede every system header; see the note in mr_util.c. */
 #define _POSIX_C_SOURCE 200809L
+
+/*
+ * ...and Darwin hides its BSD extensions when that macro is in force, which
+ * includes MAP_ANON. _DARWIN_C_SOURCE is Apple's documented way to ask for them
+ * back, and it has to be in the same place as the macro above: before the first
+ * system header.
+ *
+ * Two CI runs were spent learning this. The first stopped at
+ *
+ *   mr_host.c:219:34: error: use of undeclared identifier 'MAP_ANONYMOUS'
+ *
+ * and the obvious fix -- fall back to MAP_ANON, which is the BSD spelling -- got
+ * exactly the same error, because under _POSIX_C_SOURCE this SDK defines
+ * neither. Falling back between two names that are both hidden is not a fix.
+ */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 #endif
 
 #include "mr/mr_host.h"
@@ -18,6 +36,17 @@
 #if !defined(_WIN32)
 #include <sys/mman.h>
 #include <unistd.h>
+
+/*
+ * Darwin calls it MAP_ANON; Linux, and the rest of the Unix world, call it
+ * MAP_ANONYMOUS. The name only matters to the compiler, and this file has to
+ * compile on both, which it did not: the first arm64 macOS CI run stopped here
+ * with "use of undeclared identifier 'MAP_ANONYMOUS'" before anything else in
+ * the project was reached.
+ */
+#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
+#define MAP_ANONYMOUS MAP_ANON
+#endif
 #endif
 
 const char *mr_platform_str(mr_platform p) {
@@ -130,6 +159,10 @@ bool mr_host_can_translate_x86(const mr_host_caps *caps) {
 mr_backend mr_host_pick_backend(const mr_host_caps *caps, bool allow_metal4,
                                 const char **reason) {
   static const char *k_no_gpu = "no Metal device is available to this process";
+  static const char *k_no_metal3_family =
+      "a Metal device exists but does not support the Metal 3 GPU family, so it "
+      "cannot run the frame path (a paravirtual GPU reports no families at all, "
+      "which is what a VM without GPU passthrough looks like)";
   static const char *k_disabled =
       "Metal 4 is supported by this device but disabled in the game profile";
   static const char *k_os =
@@ -154,8 +187,16 @@ mr_backend mr_host_pick_backend(const mr_host_caps *caps, bool allow_metal4,
     return caps->metal3_available ? MR_BACKEND_METAL3 : MR_BACKEND_NONE;
   }
   if (!caps->metal3_available) {
-    /* Metal 4 cannot exist without Metal 3 support, so this means no Metal. */
-    if (reason != NULL) *reason = k_no_gpu;
+    /*
+     * This used to say "no Metal device is available to this process", on the
+     * reasoning that Metal 4 cannot exist without Metal 3 support so a missing
+     * Metal 3 family must mean no Metal. The arm64 macOS CI run showed what that
+     * costs: the probe saw "macOS Apple Paravirtual device" -- a device, visible,
+     * with gpu family 0 -- and the runtime then told the reader there was no
+     * device at all. The two situations need different sentences, because only
+     * one of them is worth looking for hardware over.
+     */
+    if (reason != NULL) *reason = k_no_metal3_family;
     return MR_BACKEND_NONE;
   }
   if (caps->metal4_available) {

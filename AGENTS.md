@@ -79,3 +79,104 @@ The CLI is `build/runtime/mrctl`. Commands: `analyze`, `profile`, `plan`,
 After changing the analyzer or the planner, run `profile` and then `plan` on the
 same executable. That round trip is the app's main flow and it is not covered by
 any single unit test.
+
+## Verifying Objective-C on a host with no Apple SDK
+
+This host cannot compile Objective-C, so `metal/` and `tests/metal/` are
+otherwise compiled exactly nowhere:
+
+```sh
+tools/check-objc.sh
+```
+
+It runs `clang -fsyntax-only` against the stubs in `tools/objc-stub-sdk/`, twice
+per file (macOS and iOS) plus a third pass for the backend with
+`OS_OBJECT_USE_OBJC=0`. Read that directory's README before trusting a result:
+it proves the ObjC is well-formed and that every vtable assignment matches
+`mr_backend.h`, and it proves nothing about whether the stubs match Apple's
+headers. It found six real bugs on first run, including
+`MTLResourceOptionsStorageModeShared` (not an Apple name) and `id<CAMetalLayer>`
+(a class used as a protocol), so it is worth running before every push that
+touches those files.
+
+## CI, and what a green run means
+
+`.github/workflows/apple-silicon.yml` runs on an arm64 macOS runner. It compiles
+and links the Objective-C backend against Apple's real SDK, which is the thing
+`check-objc.sh` cannot do.
+
+**A green run proves the Apple platform layer builds. It does not prove it
+draws.** GitHub's arm64 runners expose a paravirtual Metal device that reports no
+GPU families, so `mr_metal_test` cannot answer any of its questions there. It
+exits 77, CTest reports it as skipped through `SKIP_RETURN_CODE`, and the workflow
+turns 77 into a `::warning::` annotation reading "Metal frame path unverified".
+That annotation is the honest summary of every green run: built and linked, frame
+path not exercised.
+
+Do not remove that warning to make a run look cleaner, and do not read a green
+check as evidence that the frame path works. Verifying it needs a Mac or an iPad.
+
+Two notes for whoever touches this next. Workflows are only registered for a
+repository once one exists on the default branch, so the first Apple run needed
+this file on `main` before anything on a branch was picked up. And the runner's
+device is worth knowing about for another reason: the probe reports "macOS Apple
+Paravirtual device, gpu family 0", which independently reproduces what Madeira
+measured about `AppleParavirtDevice`.
+
+## The graphics decision, and the four verification levels
+
+`docs/graphics-path-study.md` is the study that settled where Metal 4 goes, read
+from DXMT's source rather than assumed. The outcome, so it does not have to be
+re-derived: **Metal 4 belongs inside DXMT as a patch series, and
+`include/mr/mr_backend.h` is a test and conformance interface, not the runtime's
+frame path.**
+
+The three findings that decided it. Wine's macdrv creates the `MTLDevice` and the
+`CAMetalLayer`, and DXMT never calls `MTLCreateSystemDefaultDevice` -- so a Mr
+backend owning its own device could not share resources with, or present through,
+Wine's layer. DXMT's unix side (`winemetal_unix.c`) calls Metal directly, so there
+is no seam under it to implement, only its body to rewrite. And DXMT already has
+two Metal abstractions of its own (`WMT::` in `Metal.hpp`, plus `src/dxmt/`), so a
+third would duplicate one and add a dispatch to every draw.
+
+`metal/mr_backend_metal3.m` therefore stays as a test double that draws into its
+own texture, which is what makes an unattributable crash into an attributable one.
+
+Verification levels. They are not substitutes for each other and no claim in this
+repository may blur them:
+
+| Level | Means | State |
+| --- | --- | --- |
+| BUILD VERIFIED | compiles and links on arm64 against Apple's real SDK | yes, arm64 macOS CI |
+| RUNTIME VERIFIED | the frame path ran and the pixels were asserted | no, needs a device |
+| REAL APPLE GPU VERIFIED | the above on an M-series GPU, not paravirtual | no |
+| iPadOS VERIFIED | the above in the iPadOS sandbox, signed, JIT working | no |
+
+CI reaches the first level only. If a test cannot reach its level it must report
+**Skipped**, never Passed: `mr_metal_test` exits 77 for that reason and
+`SKIP_RETURN_CODE` gives it meaning. `docs/jit-requirements.md` records what the
+iPadOS level needs and what the app cannot grant itself.
+
+## Madeira, and the licence boundary
+
+`docs/madeira-analysis.md` is the study of `nwaf92641/Madeira`, which is the
+closest existing thing to this project. Read it before designing anything that
+touches FEX, Wine, DXMT or the iOS JIT.
+
+**Madeira is GPL-3.0-or-later and Mr is MIT, so no Madeira code may be copied.**
+Its architecture, its findings about Apple's APIs and its build recipe are
+knowledge, not code, and are fine to use. Madeira's `patches/` directory is code:
+its patch text is as uncopyable as its sources, so every patch this project needs
+must be written against upstream, not lifted from there.
+
+**DXMT is LGPL-2.1, not MIT** (`COPYING.LIB`, upstream `3Shain/dxmt`). Since the
+graphics decision puts Metal 4 in DXMT as a patch series, the obligation is worth
+stating where it will be met rather than discovered later: Mr may link DXMT and
+distribute a patched DXMT, and the patch series itself is a modification of DXMT
+and must carry LGPL-2.1. It cannot be relicensed MIT by being included here. Keep
+the patches in a directory whose own headers say so, and keep DXMT a separate
+library rather than copying its sources into this tree.
+
+FEX is MIT and Wine is LGPL-2.1-or-later; the same rule applies to them in reverse
+-- FEX may be vendored, Wine may not be swallowed, and neither is affected by this
+project's MIT licence until code is actually copied into it.
