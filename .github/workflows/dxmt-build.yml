@@ -193,6 +193,32 @@ jobs:
           fi
           echo "D3D11CreateDevice: exported by d3d11.dylib"
 
+      # Asked before the probe runs, so that "this machine has no GPU" and "the
+      # probe is broken" cannot be confused for one another. This is the same
+      # mr_metal_probe() the Metal conformance test uses, so one function decides
+      # what counts as a usable device.
+      - name: Is there a GPU to verify against?
+        env:
+          DXMT_SRC: ${{ runner.temp }}/dxmt
+        run: |
+          set -euo pipefail
+          clang -O1 -o "$RUNNER_TEMP/mr_gpu_precondition" \
+            tests/dxmt/gpu_precondition.m \
+            runtime/platform/apple/mr_metal_probe.m \
+            -Iruntime/platform/apple \
+            -framework Metal -framework Foundation
+          set +e
+          "$RUNNER_TEMP/mr_gpu_precondition" 2>&1 | tee "$RUNNER_TEMP/gpu-precondition.log"
+          status=${PIPESTATUS[0]}
+          echo "precondition exit code: $status" | tee -a "$RUNNER_TEMP/gpu-precondition.log"
+          if [ "$status" -eq 0 ]; then
+            echo "gpu_ready=true" >> "$GITHUB_ENV"
+          else
+            echo "gpu_ready=false" >> "$GITHUB_ENV"
+            echo "::warning title=RUNTIME NOT VERIFIED::No usable Apple GPU on this runner, so the D3D11 probe cannot verify anything here. Not a pass and not a failure."
+          fi
+          exit 0
+
       # The probe is an ordinary macOS program linked against DXMT's native
       # libraries. Two include directories, the same pair DXMT compiles itself
       # with.
@@ -224,25 +250,29 @@ jobs:
           echo "linked against:"
           otool -L "$RUNNER_TEMP/mr_dx11_native_probe" | grep -E 'd3d11|dxgi' || true
 
-      # The GPU half. Exit 0 means the pixels were checked and were right; 77
-      # means this machine could not answer, which is reported as such; anything
-      # else is a real failure and fails the job.
+      # The GPU half, and it only runs on a machine that answered the
+      # precondition. Exit 0 means the pixels were checked and were right; 77
+      # means the device went away between the two steps and is reported as
+      # unverified; anything else is a real failure and fails the job.
       - name: Run the D3D11 probe
+        if: env.gpu_ready == 'true'
         env:
           DXMT_SRC: ${{ runner.temp }}/dxmt
-          # Belt and braces with the rpaths, for the case where DXMT's install
-          # name turns out to be bare rather than @rpath-based. This is how one
-          # runs against a build tree; it does not paper over a real failure,
-          # because a genuinely missing library still fails to load.
-          DYLD_LIBRARY_PATH: ${{ runner.temp }}/dxmt/build/src/d3d11:${{ runner.temp }}/dxmt/build/src/dxgi
         run: |
           set +e
+          # LLVM's lib directory is on the load path because DXMT's native build
+          # inherits `-L<llvm>/lib` through its airconv dependency, so winemetal
+          # ends up linked against that libc++ rather than the system one and
+          # records `@rpath/libc++.1.dylib`. Without the directory, dyld fails to
+          # load winemetal before a single line of the probe runs -- which is what
+          # happened the first time, reported as exit 134.
+          export DYLD_LIBRARY_PATH="$LLVM_ROOT/lib:$DXMT_SRC/build/src/d3d11:$DXMT_SRC/build/src/dxgi"
           "$RUNNER_TEMP/mr_dx11_native_probe" 2>&1 | tee "$RUNNER_TEMP/dx11-probe.log"
           status=${PIPESTATUS[0]}
           echo "probe exit code: $status" | tee -a "$RUNNER_TEMP/dx11-probe.log"
           if [ "$status" -eq 77 ]; then
             echo "probe_status=REQUIRES REAL APPLE GPU VALIDATION" >> "$GITHUB_ENV"
-            echo "::warning title=RUNTIME NOT VERIFIED::The probe could not create a D3D11 device on this runner, so the GPU path is unverified. This is not a pass and not a failure."
+            echo "::warning title=RUNTIME NOT VERIFIED::The probe could not create a D3D11 device, so the GPU path is unverified. This is not a pass and not a failure."
             exit 0
           fi
           if [ "$status" -ne 0 ]; then
@@ -251,6 +281,15 @@ jobs:
             exit "$status"
           fi
           echo "probe_status=PASS" >> "$GITHUB_ENV"
+
+      # The other half of the same decision, stated rather than left implied by a
+      # missing step.
+      - name: D3D11 probe not attempted
+        if: env.gpu_ready != 'true'
+        run: |
+          echo "probe_status=REQUIRES REAL APPLE GPU VALIDATION" >> "$GITHUB_ENV"
+          echo "No usable Apple GPU on this runner, so the D3D11 probe was not run."
+          echo "REQUIRES REAL APPLE GPU VALIDATION"
 
       # The verification table, written where it can be read rather than
       # reconstructed from a log later.
@@ -278,6 +317,7 @@ jobs:
             ${{ runner.temp }}/dxmt-evidence.txt
             ${{ runner.temp }}/dxmt-build.log
             ${{ runner.temp }}/dx11-probe.log
+            ${{ runner.temp }}/gpu-precondition.log
             ${{ runner.temp }}/verification.txt
             ${{ runner.temp }}/mr_dx11_native_probe
           if-no-files-found: warn
