@@ -195,23 +195,34 @@ jobs:
 
       # The probe is an ordinary macOS program linked against DXMT's native
       # libraries. Two include directories, the same pair DXMT compiles itself
-      # with, and rpaths so the dylibs are found from the build tree.
+      # with.
+      #
+      # The dylibs are named without a `lib` prefix (DXMT builds them with
+      # `name_prefix: ''`), so `-ld3d11` cannot find them: the linker looks for
+      # `libd3d11.dylib`. They are given by path instead. The rpaths and
+      # DYLD_LIBRARY_PATH are both set because the install name DXMT writes is
+      # not ours to assume, and `otool` prints what it actually is so a load
+      # failure is explainable rather than mysterious.
       - name: Build the D3D11 probe
         env:
           DXMT_SRC: ${{ runner.temp }}/dxmt
         run: |
           set -euo pipefail
-          c++ -std=c++17 -O1 -Wall \
+          echo "install names:"
+          otool -D "$DXMT_SRC/build/src/d3d11/d3d11.dylib" | tail -1
+          otool -D "$DXMT_SRC/build/src/dxgi/dxgi.dylib" | tail -1
+          c++ -std=c++17 -O1 -Wall -Wno-extern-c-compat \
             -o "$RUNNER_TEMP/mr_dx11_native_probe" \
             tests/dxmt/dx11_native_probe.cpp \
             -I"$DXMT_SRC/include/native/windows" \
             -I"$DXMT_SRC/include/native/directx" \
-            -L"$DXMT_SRC/build/src/d3d11" \
-            -L"$DXMT_SRC/build/src/dxgi" \
-            -ld3d11 -ldxgi \
+            "$DXMT_SRC/build/src/d3d11/d3d11.dylib" \
+            "$DXMT_SRC/build/src/dxgi/dxgi.dylib" \
             -Wl,-rpath,"$DXMT_SRC/build/src/d3d11" \
             -Wl,-rpath,"$DXMT_SRC/build/src/dxgi"
           file "$RUNNER_TEMP/mr_dx11_native_probe"
+          echo "linked against:"
+          otool -L "$RUNNER_TEMP/mr_dx11_native_probe" | grep -E 'd3d11|dxgi' || true
 
       # The GPU half. Exit 0 means the pixels were checked and were right; 77
       # means this machine could not answer, which is reported as such; anything
@@ -219,6 +230,11 @@ jobs:
       - name: Run the D3D11 probe
         env:
           DXMT_SRC: ${{ runner.temp }}/dxmt
+          # Belt and braces with the rpaths, for the case where DXMT's install
+          # name turns out to be bare rather than @rpath-based. This is how one
+          # runs against a build tree; it does not paper over a real failure,
+          # because a genuinely missing library still fails to load.
+          DYLD_LIBRARY_PATH: ${{ runner.temp }}/dxmt/build/src/d3d11:${{ runner.temp }}/dxmt/build/src/dxgi
         run: |
           set +e
           "$RUNNER_TEMP/mr_dx11_native_probe" 2>&1 | tee "$RUNNER_TEMP/dx11-probe.log"
