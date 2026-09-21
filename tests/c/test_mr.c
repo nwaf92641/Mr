@@ -774,7 +774,23 @@ static void test_host_backend_selection(void) {
   caps.gpu_available = false;
   caps.metal4_available = false;
   caps.metal3_available = false;
-  CHECK_INT(mr_host_pick_backend(&caps, true, &reason), MR_BACKEND_NONE);
+  const char *no_device = NULL;
+  CHECK_INT(mr_host_pick_backend(&caps, true, &no_device), MR_BACKEND_NONE);
+  CHECK(no_device != NULL);
+
+  /*
+   * A device that is there and reports no Metal 3 family, which is what a
+   * paravirtual GPU looks like. This is a different machine from the one above
+   * and it must not be described with the same sentence: the arm64 macOS CI
+   * runner is exactly this case, and saying "no device" about a device the probe
+   * had just named sent the diagnosis in the wrong direction.
+   */
+  caps.gpu_available = true;
+  caps.metal3_available = false;
+  const char *no_family = NULL;
+  CHECK_INT(mr_host_pick_backend(&caps, true, &no_family), MR_BACKEND_NONE);
+  CHECK(no_family != NULL);
+  CHECK(strcmp(no_device, no_family) != 0);
 
   /* An Apple Silicon device without Metal 4 is still usable. */
   caps.gpu_available = true;

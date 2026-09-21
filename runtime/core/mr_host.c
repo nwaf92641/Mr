@@ -159,6 +159,10 @@ bool mr_host_can_translate_x86(const mr_host_caps *caps) {
 mr_backend mr_host_pick_backend(const mr_host_caps *caps, bool allow_metal4,
                                 const char **reason) {
   static const char *k_no_gpu = "no Metal device is available to this process";
+  static const char *k_no_metal3_family =
+      "a Metal device exists but does not support the Metal 3 GPU family, so it "
+      "cannot run the frame path (a paravirtual GPU reports no families at all, "
+      "which is what a VM without GPU passthrough looks like)";
   static const char *k_disabled =
       "Metal 4 is supported by this device but disabled in the game profile";
   static const char *k_os =
@@ -183,8 +187,16 @@ mr_backend mr_host_pick_backend(const mr_host_caps *caps, bool allow_metal4,
     return caps->metal3_available ? MR_BACKEND_METAL3 : MR_BACKEND_NONE;
   }
   if (!caps->metal3_available) {
-    /* Metal 4 cannot exist without Metal 3 support, so this means no Metal. */
-    if (reason != NULL) *reason = k_no_gpu;
+    /*
+     * This used to say "no Metal device is available to this process", on the
+     * reasoning that Metal 4 cannot exist without Metal 3 support so a missing
+     * Metal 3 family must mean no Metal. The arm64 macOS CI run showed what that
+     * costs: the probe saw "macOS Apple Paravirtual device" -- a device, visible,
+     * with gpu family 0 -- and the runtime then told the reader there was no
+     * device at all. The two situations need different sentences, because only
+     * one of them is worth looking for hardware over.
+     */
+    if (reason != NULL) *reason = k_no_metal3_family;
     return MR_BACKEND_NONE;
   }
   if (caps->metal4_available) {

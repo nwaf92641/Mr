@@ -184,10 +184,32 @@ int main(int argc, char **argv) {
   mr_report(1, "a Metal device is visible to this process",
             host.gpu_available ? R_PASS : R_SKIP, detail);
 
-  if (!host.gpu_available) {
-    printf("\nThis machine exposes no Metal device, so nothing below can be\n"
-           "verified here. That is an environment fact, not a result: the\n"
-           "backend needs a Mac, an iPad, or a VM with GPU passthrough.\n\n");
+  /*
+   * Two different machines, and neither can answer the questions below:
+   *
+   *  - no device object at all, and
+   *  - a device that is there and reports no Metal 3 GPU family.
+   *
+   * The second one is what GitHub's arm64 macOS runners give: the probe names
+   * the device ("macOS Apple Paravirtual device") and reports gpu family 0, and a
+   * paravirtual GPU reports no families at all. Both cases leave the frame path
+   * unexercised, so both have to say so rather than pass.
+   */
+  if (!host.gpu_available || !host.metal3_available) {
+    const char *why = !host.gpu_available
+                          ? "no Metal device on this machine"
+                          : "the device reports no Metal 3 GPU family";
+    if (!host.gpu_available) {
+      printf("\nThis machine exposes no Metal device, so nothing below can be\n"
+             "verified here. That is an environment fact, not a result: the\n"
+             "backend needs a Mac, an iPad, or a VM with GPU passthrough.\n\n");
+    } else {
+      printf("\nThis device is visible but reports no Metal 3 GPU family, so the\n"
+             "frame path cannot be exercised on it. That is also an environment\n"
+             "fact: a paravirtual GPU reports no GPU families at all, which is\n"
+             "what a virtual machine without GPU passthrough provides, and it is\n"
+             "what GitHub's own arm64 macOS runners are.\n\n");
+    }
     static const char *const k_no_device[] = {
         "backend created",
         "backend describes its own capabilities",
@@ -199,7 +221,7 @@ int main(int argc, char **argv) {
         "unimplemented calls refuse and explain",
     };
     for (int i = 0; i < (int)(sizeof(k_no_device) / sizeof(k_no_device[0])); i++) {
-      mr_report(2 + i, k_no_device[i], R_SKIP, "no Metal device on this machine");
+      mr_report(2 + i, k_no_device[i], R_SKIP, why);
     }
     mr_report(10, "FEX executed translated ARM64 code", R_SKIP,
               "FEX is not integrated yet; needs the arm64 FEXCore build and a JIT "
@@ -211,7 +233,16 @@ int main(int argc, char **argv) {
               "drive it");
     printf("\n%d passed, %d failed, %d unverified\n", g_passes, g_failures,
            g_unverified);
-    return 0;
+    /*
+     * 77, not 0. CTest is told to read that as "skipped" through
+     * SKIP_RETURN_CODE in tests/metal/CMakeLists.txt.
+     *
+     * Exit 0 here would have been the misleading case: every question reported as
+     * unverified and the test still counted as passed, so a green check would
+     * have meant nothing at all. A run that verified nothing must not look like a
+     * run that verified everything.
+     */
+    return 77;
   }
 
   const char *reason = NULL;

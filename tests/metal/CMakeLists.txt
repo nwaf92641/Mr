@@ -96,3 +96,9 @@ add_dependencies(mr_metal_test mr_metallib)
 
 add_test(NAME mr_metal_test
          COMMAND mr_metal_test ${MR_METAL_LIB})
+
+# The test exits 77 when the machine cannot answer its questions -- no Metal
+# device, or a paravirtual one with no Metal 3 GPU family, which is what GitHub's
+# arm64 macOS runners provide. CTest reports that as skipped rather than passed,
+# because "unverified" and "verified" must not look the same in a summary.
+set_tests_properties(mr_metal_test PROPERTIES SKIP_RETURN_CODE 77)
