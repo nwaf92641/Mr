@@ -79,3 +79,46 @@ The CLI is `build/runtime/mrctl`. Commands: `analyze`, `profile`, `plan`,
 After changing the analyzer or the planner, run `profile` and then `plan` on the
 same executable. That round trip is the app's main flow and it is not covered by
 any single unit test.
+
+## Verifying Objective-C on a host with no Apple SDK
+
+This host cannot compile Objective-C, so `metal/` and `tests/metal/` are
+otherwise compiled exactly nowhere:
+
+```sh
+tools/check-objc.sh
+```
+
+It runs `clang -fsyntax-only` against the stubs in `tools/objc-stub-sdk/`, twice
+per file (macOS and iOS) plus a third pass for the backend with
+`OS_OBJECT_USE_OBJC=0`. Read that directory's README before trusting a result:
+it proves the ObjC is well-formed and that every vtable assignment matches
+`mr_backend.h`, and it proves nothing about whether the stubs match Apple's
+headers. It found six real bugs on first run, including
+`MTLResourceOptionsStorageModeShared` (not an Apple name) and `id<CAMetalLayer>`
+(a class used as a protocol), so it is worth running before every push that
+touches those files.
+
+## CI, and why the Apple job has not run
+
+`.github/workflows/apple-silicon.yml` builds and runs everything on an arm64
+macOS runner, which is the only place the Metal backend can actually execute.
+GitHub has **not** registered it: `GET /actions/workflows` returns 0 and
+`workflow_dispatch` 404s, even though the file is valid YAML at a valid path in
+a pushed commit. The pattern is that workflows are registered from the default
+branch, and this repository has no workflow on `main` yet, so nothing on a
+branch gets picked up. Landing the workflow on `main` is the fix; after that it
+runs on every push and pull request.
+
+Until then, do not describe the Apple platform layer as verified. Verified means
+`check-objc.sh` green plus the Metal test's own output from a machine with a GPU.
+
+## Madeira, and the licence boundary
+
+`docs/madeira-analysis.md` is the study of `nwaf92641/Madeira`, which is the
+closest existing thing to this project. Read it before designing anything that
+touches FEX, Wine, DXMT or the iOS JIT.
+
+**Madeira is GPL-3.0-or-later and Mr is MIT, so no Madeira code may be copied.**
+Its architecture, its findings about Apple's APIs and its build recipe are
+knowledge, not code, and are fine to use.
