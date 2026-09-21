@@ -591,15 +591,16 @@ static mr_status mr_texture_create(mr_gfx_backend *self,
       d.storageMode = desc->shared ? MTLStorageModeShared : MTLStorageModePrivate;
     }
 
-    if (desc->label != NULL) {
-      d.label = [NSString stringWithUTF8String:desc->label];
-    }
-
     id<MTLTexture> texture = [c->device newTextureWithDescriptor:d];
     [d release];
     if (texture == nil) {
       return mr_state(c, "Metal refused to allocate the texture (see the device "
                          "log; usually a size or sample-count limit)");
+    }
+    if (desc->label != NULL) {
+      /* On MTLTexture, not on MTLTextureDescriptor: the descriptor has no label,
+       * which the first Apple build of this file said plainly. */
+      texture.label = [NSString stringWithUTF8String:desc->label];
     }
 
     mr_gfx_handle h = mr_intern(c, MR_OBJ_TEXTURE, texture);
@@ -810,12 +811,14 @@ static mr_status mr_render_encoder_begin(mr_gfx_backend *self, mr_gfx_handle cmd
 
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     mr_fill_render_pass(c, rp, desc);
-    if (desc->label != NULL) {
-      rp.label = [NSString stringWithUTF8String:desc->label];
-    }
 
     id<MTLRenderCommandEncoder> enc =
         [buffer renderCommandEncoderWithDescriptor:rp];
+    if (enc != nil && desc->label != NULL) {
+      /* The encoder, not the descriptor: MTLRenderPassDescriptor has no label
+       * either, and the encoder's is the one a frame capture shows. */
+      enc.label = [NSString stringWithUTF8String:desc->label];
+    }
     if (enc == nil) {
       return mr_state(c, "Metal refused to make a render encoder (the pass had "
                          "no usable attachment)");
@@ -1234,9 +1237,15 @@ static mr_status mr_use_residency_set(mr_gfx_backend *self,
       if (os == NULL || os->obj == nil) continue;
       /* Read and write, because the set says the resource is in play, not what
        * for, and under-declaring the usage is the direction that risks a
-       * dependency being missed. */
+       * dependency being missed. Both render stages, for the same reason.
+       *
+       * useResource:usage: is deprecated from macOS 13 / iOS 16 and this project
+       * builds with -Werror, so it was a build failure, not a warning. It also
+       * could not say which stage the resource was for, which is what the
+       * replacement wants to know. */
       [enc useResource:os->obj
-                   usage:MTLResourceUsageRead | MTLResourceUsageWrite];
+                 usage:MTLResourceUsageRead | MTLResourceUsageWrite
+                stages:MTLRenderStageVertex | MTLRenderStageFragment];
     }
     return MR_OK;
   }

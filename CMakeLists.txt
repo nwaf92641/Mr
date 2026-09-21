@@ -1,5 +1,24 @@
 cmake_minimum_required(VERSION 3.20)
 
+# Must precede project(): CMake reads this while it configures the compiler, so
+# setting it afterwards changes nothing.
+#
+# The floor comes from the Metal API the backend uses rather than from a
+# preference. useResource:usage:stages: replaces a call deprecated in macOS 13 /
+# iOS 16, and this project builds with -Werror, so the replacement has to be
+# available. Mr's iOS target is iPadOS 26 with Metal 4 and Metal 3 as the
+# fallback, so a floor of 26 for iOS and 13 for macOS is below where the project
+# already is.
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+  if(DEFINED CMAKE_SYSTEM_NAME AND CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "26.0" CACHE STRING
+        "Minimum iOS deployment target")
+  else()
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING
+        "Minimum macOS deployment target")
+  endif()
+endif()
+
 project(Mr
   VERSION 0.1.0
   DESCRIPTION "Apple Silicon runtime for Windows x86-64 DirectX 11 games"
@@ -131,6 +150,26 @@ add_subdirectory(runtime)
 if(APPLE AND MR_TARGET_ARM64)
   add_subdirectory(metal)
   add_subdirectory(metal4)
+
+  # Whatever backend exists is linked into mrcore, because mrcore is what
+  # declares mr_gfx_backend_create_apple and what every consumer links.
+  #
+  # The first Apple build left this out, and it failed at the link of mr_tests:
+  #
+  #   Undefined symbols for architecture arm64:
+  #     "_mr_gfx_backend_create_apple", referenced from:
+  #         _mr_gfx_backend_create in libmrcore.a[10](mr_backend.c.o)
+  #
+  # mrctl happened to link, because it never pulls mr_backend.c.o out of the
+  # archive. That is the failure mode to avoid: whether an executable links
+  # depended on which objects the linker happened to need. Doing it here means no
+  # consumer has to know the backend exists, and the backend itself calls nothing
+  # in mrcore, so this is not the front of a cycle.
+  foreach(mr_backend_target mrmetal3 mrmetal4)
+    if(TARGET ${mr_backend_target})
+      target_link_libraries(mrcore PUBLIC ${mr_backend_target})
+    endif()
+  endforeach()
 endif()
 
 # The Metal backend's test lives outside tests/c because it needs an Apple SDK
