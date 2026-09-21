@@ -1,0 +1,172 @@
+# DXMT on Apple Silicon.
+#
+# Phase one of the runtime: prove that DXMT itself builds on arm64 macOS, against
+# Apple's real SDK, at a pinned commit. This is the component that owns the
+# graphics path (docs/graphics-path-study.md), so its build is the first thing
+# worth establishing and the first thing worth failing on.
+#
+# What this job proves, exactly: DXMT's native macOS build compiles and links, and
+# the libraries it produces are Mach-O arm64. BUILD VERIFIED, and nothing more.
+# It is not RUNTIME VERIFIED: nothing here creates a D3D11 device, and a runner's
+# paravirtual GPU could not render if it tried. The triangle needs a real Mac and
+# lives in a separate program that this build makes it possible to compile.
+#
+# DXMT is built natively (-DDXMT_NATIVE build mode, `nativemetal` in its tree)
+# rather than as a Windows PE DLL, because the PE build needs an ARM64EC cross
+# toolchain and an installed Wine, and neither is a prerequisite for finding out
+# whether the Metal-facing half compiles. The Wine build comes next and is a
+# separate job, not a precondition of this one.
+#
+# Nothing is vendored: DXMT and LLVM are fetched into $RUNNER_TEMP, outside the
+# repository. DXMT is LGPL-2.1; see third_party/README.md.
+
+name: DXMT on Apple Silicon
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-dxmt:
+    runs-on: macos-15
+    # LLVM is 644 MB to download and DXMT is a large C++ tree. Generous, because a
+    # timeout that kills a working build is a false negative.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Printed before anything can fail: every later failure reads better with
+      # the toolchain versions above it, and these are the answers the report has
+      # to contain.
+      - name: Toolchain, recorded
+        run: |
+          set +e
+          sw_vers
+          uname -m
+          xcodebuild -version
+          echo "SDK: $(xcrun --show-sdk-version 2>&1)"
+          echo "SDK path: $(xcrun --show-sdk-path 2>&1)"
+          clang --version | head -2
+          cmake --version | head -1
+          git --version
+          meson --version 2>&1 || echo "meson: not installed yet"
+
+      # DXMT's airconv translates DXBC to AIR and links LLVM to do it, and DXMT's
+      # development documentation has no LLVM-free path. The prebuilt release is
+      # used rather than the Homebrew formula on purpose: the arm64 bottles for
+      # llvm@15 stop at Sonoma, so on a newer runner Homebrew would compile LLVM
+      # from source. The prebuilt also matches the generic link flags in
+      # src/airconv/darwin/meson.build instead of its /opt/homebrew/opt branch.
+      - name: LLVM 15, which airconv links against
+        run: |
+          set -euo pipefail
+          . third_party/dxmt.lock
+          echo "Fetching LLVM ${LLVM_VERSION}: ${LLVM_ASSET}"
+          curl -fL --retry 3 --retry-delay 5 -o "$RUNNER_TEMP/llvm.tar.xz" "${LLVM_URL}"
+          mkdir -p "$RUNNER_TEMP/llvm"
+          tar -xJf "$RUNNER_TEMP/llvm.tar.xz" -C "$RUNNER_TEMP/llvm" --strip-components=1
+          rm -f "$RUNNER_TEMP/llvm.tar.xz"
+          echo "LLVM_ROOT=$RUNNER_TEMP/llvm" >> "$GITHUB_ENV"
+          "$RUNNER_TEMP/llvm/bin/llvm-config" --version
+          ls "$RUNNER_TEMP/llvm/lib" | grep -c '^libLLVM' || true
+
+      - name: Fetch DXMT at the pinned commit
+        run: |
+          set -euo pipefail
+          . third_party/dxmt.lock
+          git clone --quiet "${DXMT_REPO}" "$RUNNER_TEMP/dxmt"
+          git -C "$RUNNER_TEMP/dxmt" checkout --quiet "${DXMT_COMMIT}"
+          echo "DXMT at: $(git -C "$RUNNER_TEMP/dxmt" log -1 --format='%H %ad' --date=short)"
+          echo "Expected: ${DXMT_COMMIT} ${DXMT_COMMIT_DATE}"
+          # DXMT's own meson.build errors out without this, so fetching it is part
+          # of fetching DXMT rather than an optional extra.
+          git -C "$RUNNER_TEMP/dxmt" submodule update --init --recursive
+          test -f "$RUNNER_TEMP/dxmt/include/native/directx/d3d11.h"
+          echo "mingw directx headers: present"
+
+      - name: Toolchain for the build (meson)
+        run: |
+          set -euo pipefail
+          if ! command -v meson >/dev/null 2>&1; then
+            brew install meson
+          fi
+          meson --version
+
+      - name: meson setup
+        env:
+          DXMT_SRC: ${{ runner.temp }}/dxmt
+        run: |
+          set -euo pipefail
+          cd "$DXMT_SRC"
+          . "$GITHUB_WORKSPACE/third_party/dxmt.lock"
+          # Recorded verbatim, because the report has to contain the command that
+          # was actually run rather than an equivalent one.
+          echo "meson setup build --buildtype release -Dnative_llvm_path=\$LLVM_ROOT"
+          meson setup build \
+            --buildtype release \
+            -Dnative_llvm_path="$LLVM_ROOT"
+          meson introspect build --projectinfo
+
+      - name: meson compile
+        env:
+          DXMT_SRC: ${{ runner.temp }}/dxmt
+        run: |
+          set -euo pipefail
+          cd "$DXMT_SRC"
+          start=$(date +%s)
+          meson compile -C build 2>&1 | tee "$RUNNER_TEMP/dxmt-build.log"
+          echo "build seconds: $(( $(date +%s) - start ))"
+
+      # Runs whether the build succeeded or failed, so a failed run still
+      # explains itself. This is evidence collection, not verification: it says
+      # what exists, and the job still fails if the build step did.
+      - name: Record what was produced
+        if: always()
+        env:
+          DXMT_SRC: ${{ runner.temp }}/dxmt
+        run: |
+          set +e
+          {
+            echo "== toolchain =="
+            sw_vers
+            uname -m
+            xcodebuild -version
+            xcrun --show-sdk-version
+            clang --version | head -2
+            echo
+            echo "== dxmt =="
+            git -C "$DXMT_SRC" log -1 --format='%H %ad' --date=short
+            echo
+            echo "== artifacts =="
+            find "$DXMT_SRC/build" -type f \( -name '*.dylib' -o -name '*.a' -o -name '*.metallib' \) | sort
+            echo
+            echo "== what they are =="
+            find "$DXMT_SRC/build" -type f \( -name '*.dylib' -o -name '*.metallib' \) -exec file {} \;
+          } 2>&1 | tee "$RUNNER_TEMP/dxmt-evidence.txt"
+        # A build that produced no Metal layer did not build the thing this job is
+        # for, whatever else it produced.
+      - name: The Metal layer must exist
+        env:
+          DXMT_SRC: ${{ runner.temp }}/dxmt
+        run: |
+          set -euo pipefail
+          found=$(find "$DXMT_SRC/build" -name 'winemetal.dylib' | head -1)
+          if [ -z "$found" ]; then
+            echo "::error::DXMT built but produced no winemetal.dylib, so its Metal layer is not in the output. See third_party/README.md and docs/dxmt-integration.md."
+            exit 1
+          fi
+          echo "Metal layer: $found"
+          file "$found"
+
+      - name: Upload build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dxmt-build-evidence
+          path: |
+            ${{ runner.temp }}/dxmt-evidence.txt
+            ${{ runner.temp }}/dxmt-build.log
+          if-no-files-found: warn

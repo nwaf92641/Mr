@@ -1,0 +1,39 @@
+# Upstream pins for the runtime's third-party components.
+#
+# This file is shell-sourceable and is the single source of truth: the workflows
+# read it rather than repeating versions, so a version cannot drift between the
+# document that claims it and the build that uses it.
+#
+# Nothing here is vendored into this repository. DXMT is LGPL-2.1 and Wine is
+# LGPL-2.1-or-later, so both stay separate libraries fetched at build time; see
+# third_party/README.md.
+
+# DXMT -- Direct3D 11 to Metal, and here the graphics path itself.
+#
+# Pinned rather than tracking a branch, because everything in docs/dxmt-integration.md
+# is a statement about this exact tree. The Metal 4 work will be a patch series
+# against this commit.
+DXMT_REPO=https://github.com/3Shain/dxmt
+DXMT_COMMIT=7c8dee1c2d73415301ceb7d1fa810861cef4cd67
+DXMT_COMMIT_DATE=2026-09-16
+DXMT_LICENSE=LGPL-2.1
+# Required by DXMT's own build check (include/native/directx/d3d11.h) and by
+# enable_d3d12, which Mr leaves off.
+DXMT_SUBMODULE_MINGW_DIRECTX_HEADERS=https://github.com/misyltoad/mingw-directx-headers
+
+# LLVM 15 -- airconv translates DXBC to AIR and links LLVM to do it.
+#
+# DXMT's development documentation names LLVM 15 (llvmorg-15.0.7) and its
+# -Dnative_llvm_path default points at a Homebrew llvm@15. The prebuilt release is
+# used instead of the formula: the arm64 bottles cover up to Sonoma, and a runner
+# newer than that would build LLVM from source. The prebuilt also takes the
+# generic link flags in src/airconv/darwin/meson.build rather than the
+# /opt/homebrew/opt branch, so it is the path less able to surprise us.
+LLVM_VERSION=15.0.7
+LLVM_ASSET=clang+llvm-15.0.7-arm64-apple-darwin22.0.tar.xz
+LLVM_URL=https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.7/clang+llvm-15.0.7-arm64-apple-darwin22.0.tar.xz
+
+# Not integrated yet, pinned here so the decision is recorded rather than
+# rediscovered. Wine ARM64EC is the next component after DXMT.
+# WINE_REPO/WINE_COMMIT intentionally unset: no Wine pin exists until there is a
+# build that uses one, and a placeholder commit would be a lie.
