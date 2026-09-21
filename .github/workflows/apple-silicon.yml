@@ -56,11 +56,25 @@ jobs:
 
       # The Metal backend test, run directly rather than through ctest so its
       # per-question output reaches the log whether it passes or fails.
+      #
+      # Exit 77 is the test saying the machine cannot answer its questions, which
+      # is what GitHub's own arm64 runners do: their Metal device is paravirtual
+      # and reports no GPU families, so there is nothing to draw on. That is not a
+      # reason to fail the job, and it is emphatically not a reason to pass it
+      # quietly -- hence the ::warning::, which shows up on the run as an
+      # annotation rather than scrolling past in a log nobody reads.
       - name: Metal backend test
         run: |
           set -o pipefail
+          set +e
           ./build/tests/metal/mr_metal_test \
             ./build/tests/metal/triangle.metallib | tee /tmp/metal-test.log
+          status=$?
+          if [ "$status" -eq 77 ]; then
+            echo "::warning title=Metal frame path unverified::This runner has no usable Metal device, so the Metal backend was built and linked but its frame path was not exercised. A Mac or an iPad is needed to verify it."
+            exit 0
+          fi
+          exit "$status"
 
       - name: Upload the Metal test log
         if: always()
