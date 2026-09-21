@@ -18,6 +18,17 @@
 #if !defined(_WIN32)
 #include <sys/mman.h>
 #include <unistd.h>
+
+/*
+ * Darwin calls it MAP_ANON; Linux, and the rest of the Unix world, call it
+ * MAP_ANONYMOUS. The name only matters to the compiler, and this file has to
+ * compile on both, which it did not: the first arm64 macOS CI run stopped here
+ * with "use of undeclared identifier 'MAP_ANONYMOUS'" before anything else in
+ * the project was reached.
+ */
+#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
+#define MAP_ANONYMOUS MAP_ANON
+#endif
 #endif
 
 const char *mr_platform_str(mr_platform p) {
