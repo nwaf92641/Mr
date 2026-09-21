@@ -99,19 +99,29 @@ headers. It found six real bugs on first run, including
 (a class used as a protocol), so it is worth running before every push that
 touches those files.
 
-## CI, and why the Apple job has not run
+## CI, and what a green run means
 
-`.github/workflows/apple-silicon.yml` builds and runs everything on an arm64
-macOS runner, which is the only place the Metal backend can actually execute.
-GitHub has **not** registered it: `GET /actions/workflows` returns 0 and
-`workflow_dispatch` 404s, even though the file is valid YAML at a valid path in
-a pushed commit. The pattern is that workflows are registered from the default
-branch, and this repository has no workflow on `main` yet, so nothing on a
-branch gets picked up. Landing the workflow on `main` is the fix; after that it
-runs on every push and pull request.
+`.github/workflows/apple-silicon.yml` runs on an arm64 macOS runner. It compiles
+and links the Objective-C backend against Apple's real SDK, which is the thing
+`check-objc.sh` cannot do.
 
-Until then, do not describe the Apple platform layer as verified. Verified means
-`check-objc.sh` green plus the Metal test's own output from a machine with a GPU.
+**A green run proves the Apple platform layer builds. It does not prove it
+draws.** GitHub's arm64 runners expose a paravirtual Metal device that reports no
+GPU families, so `mr_metal_test` cannot answer any of its questions there. It
+exits 77, CTest reports it as skipped through `SKIP_RETURN_CODE`, and the workflow
+turns 77 into a `::warning::` annotation reading "Metal frame path unverified".
+That annotation is the honest summary of every green run: built and linked, frame
+path not exercised.
+
+Do not remove that warning to make a run look cleaner, and do not read a green
+check as evidence that the frame path works. Verifying it needs a Mac or an iPad.
+
+Two notes for whoever touches this next. Workflows are only registered for a
+repository once one exists on the default branch, so the first Apple run needed
+this file on `main` before anything on a branch was picked up. And the runner's
+device is worth knowing about for another reason: the probe reports "macOS Apple
+Paravirtual device, gpu family 0", which independently reproduces what Madeira
+measured about `AppleParavirtDevice`.
 
 ## Madeira, and the licence boundary
 
