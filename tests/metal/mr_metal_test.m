@@ -476,7 +476,6 @@ static mr_status mr_run_frame(mr_gfx_backend *gfx, mr_gfx_handle library,
   pd.depth_format = MR_FMT_UNKNOWN;
   pd.sample_count = 1;
   pd.raster_sample_count = 1;
-  pd.label = "test pipeline";
   st = gfx->compile_render_pipeline(gfx, &pd, &pso);
   if (st != MR_OK) {
     snprintf(why, why_len, "compile_render_pipeline: %s",

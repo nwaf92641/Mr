@@ -34,8 +34,14 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <dispatch/dispatch.h>
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* Needed for TARGET_OS_OSX. Metal.h happens to pull it in on Apple's SDK, and
+ * relying on that is how a file ends up compiling differently on a platform
+ * nobody tested. */
+#include <TargetConditionals.h>
 
 #include "mr_metal_backend.h"
 #include "mr/mr_backend.h"
@@ -121,7 +127,7 @@ typedef struct {
   mr_gfx_handle current_encoder;
 
   /* Borrowed from the process, retained here: the layer present() draws into. */
-  id<CAMetalLayer> layer;
+  CAMetalLayer *layer;
 
   char reason[256];
   char commit_status[256];
@@ -500,7 +506,7 @@ static mr_status mr_commit(mr_gfx_backend *self, const mr_gfx_handle *cmds,
   return MR_OK;
 }
 
-static mr_status mr_metal_wait_idle(mr_gfx_backend *self) {
+mr_status mr_metal_wait_idle(mr_gfx_backend *self) {
   mr_metal_ctx *c = mr_ctx(self);
   if (c == NULL) return MR_ERR_INVALID;
 
@@ -614,8 +620,8 @@ static mr_status mr_buffer_create(mr_gfx_backend *self,
   if (desc->length == 0) return MR_ERR_INVALID;
 
   @autoreleasepool {
-    MTLResourceOptions opts = desc->shared ? MTLResourceOptionsStorageModeShared
-                                           : MTLResourceOptionsStorageModePrivate;
+    MTLResourceOptions opts = desc->shared ? MTLResourceStorageModeShared
+                                           : MTLResourceStorageModePrivate;
     if (desc->length > (uint64_t)c->device.maxBufferLength) {
       return mr_state(c, "buffer exceeds the device's maximum buffer length");
     }
@@ -728,7 +734,9 @@ static mr_status mr_copy_into_texture(mr_gfx_backend *self, mr_gfx_handle cmd,
  */
 static void mr_fill_render_pass(mr_metal_ctx *c, MTLRenderPassDescriptor *rp,
                                 const mr_render_pass_desc *desc) {
-  for (uint32_t i = 0; i < desc->color_count && i < 8; i++) {
+  /* There is no attachment count in the ABI: an unused colour attachment is one
+   * whose handle is MR_GFX_HANDLE_NONE, so the whole array is walked. */
+  for (uint32_t i = 0; i < 8; i++) {
     if (desc->color[i] == MR_GFX_HANDLE_NONE) continue;
     mr_obj_slot *ts = mr_slot_as(c, desc->color[i], MR_OBJ_TEXTURE);
     if (ts == NULL) continue;
@@ -790,7 +798,13 @@ static mr_status mr_render_encoder_begin(mr_gfx_backend *self, mr_gfx_handle cmd
       return mr_state(c, "an encoder is already open; end it before beginning "
                          "another");
     }
-    if (desc->color_count == 0 && desc->depth == MR_GFX_HANDLE_NONE) {
+    uint32_t color_count = 0;
+    for (uint32_t i = 0; i < 8; i++) {
+      if (desc->color[i] != MR_GFX_HANDLE_NONE) color_count++;
+    }
+    if (color_count == 0 && desc->depth == MR_GFX_HANDLE_NONE) {
+      /* A pass with nothing to render into is a caller bug, and Metal's own
+       * answer is a validation failure about a missing render target. */
       return MR_ERR_INVALID;
     }
 
@@ -1333,8 +1347,15 @@ static mr_status mr_compile_render_pipeline(mr_gfx_backend *self,
 
     MTLRenderPipelineDescriptor *d =
         [[MTLRenderPipelineDescriptor alloc] init];
-    if (desc->label != NULL) {
-      d.label = [NSString stringWithUTF8String:desc->label];
+    /* mr_render_pipeline_desc has no label, so Metal's pipeline has none either.
+     * Naming it after the two functions is more use in a Metal frame capture
+     * than nothing, and it is a name the ABI cannot supply. */
+    {
+      NSString *vn = [NSString stringWithUTF8String:desc->vertex.function];
+      NSString *fn = [NSString stringWithUTF8String:desc->fragment.function];
+      if (vn != nil && fn != nil) {
+        d.label = [NSString stringWithFormat:@"%@+%@", vn, fn];
+      }
     }
 
     NSError *error = nil;
@@ -1460,7 +1481,7 @@ mr_status mr_metal_set_drawable_layer(mr_gfx_backend *backend, void *layer) {
   @autoreleasepool {
     if (c->layer != nil) { [c->layer release]; c->layer = nil; }
     if (layer != NULL) {
-      c->layer = (id<CAMetalLayer>)layer;
+      c->layer = (CAMetalLayer *)layer;
       [c->layer retain];
       /* A CAMetalLayer with no device cannot produce a drawable, and a caller
        * has no reason to know which device the backend is using. Filling it in
