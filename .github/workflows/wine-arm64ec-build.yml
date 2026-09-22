@@ -57,8 +57,23 @@ jobs:
           echo "sdk: $(xcrun --sdk macosx --show-sdk-path)"
           echo "xcode: $(xcodebuild -version 2>/dev/null | head -1)"
           sw_vers
-          brew install bison flex pkg-config >/dev/null 2>&1 || true
+          # macOS ships bison 2.3 in /usr/bin and Wine's configure refuses anything
+          # below 3.0: "Your bison version is too old. Please install bison version
+          # 3.0 or newer." Homebrew's bison is keg-only, so installing it is not
+          # enough -- /usr/bin still wins until its bin directory is put in front.
+          # GITHUB_PATH does that for every later step, because a PATH change made
+          # inside one step does not survive into the next.
+          brew install bison flex pkg-config
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          export PATH="$(brew --prefix bison)/bin:$PATH"
           echo "bison: $(bison --version | head -1)"
+          # Checked rather than assumed: this failed as a configure error once
+          # already, one step away from the cause.
+          bison_major=$(bison --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1 | cut -d. -f1)
+          test "$bison_major" -ge 3 || {
+            echo "::error::bison is $bison_major, and Wine's configure requires 3.0 or newer"
+            exit 1
+          }
           test -d "$(xcrun --sdk macosx --show-sdk-path)" || {
             echo "::error::no macOS SDK, and Wine's configure needs one"
             exit 1
