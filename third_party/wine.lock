@@ -1,0 +1,72 @@
+# Wine, pinned. Read by .github/workflows/wine-arm64ec-build.yml, and by anyone
+# reading this file, so every value here is a fact that was checked.
+
+repository      = https://github.com/wine-mirror/wine
+upstream        = https://gitlab.winehq.org/wine/wine
+tag             = wine-11.0
+tag_object      = ce295733f9a67970b7f60d7af201f2ac16441a50
+commit          = db11d0fe6a169c457e23d007e20404643d067aa8
+commit_date     = 2026-01-13T15:56:07Z
+commit_subject  = Release 11.0.
+license         = LGPL-2.1-or-later
+
+                  Wine's licence is LGPL-2.1-or-later, per its LICENSE file. Only
+                  the upstream tree is used here: no fork, and no patch series.
+                  Madeira, which is the reference for this architecture, builds
+                  Wine from a fork (willfaust/wine, branch ios-build). That fork
+                  is a GPL-3.0 project's component and is not used or copied.
+
+                  The commit is recorded, not the tag object. `git ls-remote`
+                  prints the annotated tag's own object first, and pinning that
+                  would pin a tag message rather than a tree.
+
+# Architecture is two different things in one build, and conflating them is the
+# mistake this file exists to prevent.
+#
+#   unix side   arm64, macOS. The loader and the .so modules (ntdll.so,
+#               win32u.so, the graphics driver) are Mach-O arm64, built by the
+#               host clang for the machine they run on.
+#   PE side     arm64ec and aarch64. The Windows modules are PE files built by
+#               llvm-mingw. ARM64EC is a distinct PE machine type, 0xA641, not
+#               arm64 with a flag -- which is why the workflow reads the machine
+#               type out of every DLL it produces instead of trusting that a
+#               cross build did what the flags asked. A DLL built for aarch64
+#               (0xAA64) where ARM64EC was wanted would link and would not run.
+#
+architectures   = host_unix:arm64
+                  pe:arm64ec
+                  pe:aarch64
+                  pe:x86_64        (extra arch: configure requires it for arm64ec)
+
+# PE toolchain. llvm-mingw is what Wine's configure probes for
+# (arm64ec-w64-mingw32-clang, arm64ec-w64-mingw32-gcc, or clang), and it is the
+# only toolchain that ships an arm64ec target for macOS hosts.
+#
+# Pinned by version, not by digest. The workflow prints the SHA-256 it computes
+# for the downloaded archive, and that value belongs here once it has been seen.
+# Writing a digest nobody has checked would be an invented fact in a file whose
+# whole purpose is to hold checked ones.
+mingw           = mstorsjo/llvm-mingw
+mingw_version   = 20260908
+mingw_asset     = llvm-mingw-20260908-ucrt-macos-universal.tar.xz
+
+# Why this version, in order of weight.
+reason          = 1. wine-11.0 supports the architecture this project needs. In
+                     configure.ac at this tag, -enable-archs accepts arm64ec
+                     (line 377: i386|x86_64|arm|aarch64|arm64ec), arm64ec
+                     requires an extra x86_64 arch (line 398), and configure
+                     probes for an arm64ec cross compiler (lines 419-420). Read
+                     from the tagged source, not assumed.
+                  2. It is a stable tag. main moves, and only its hash pins it;
+                     a tag plus a hash is what this project pins.
+                  3. dlls/d3d11, dlls/dxgi and dlls/d3dcompiler_47 all exist at
+                     this tag, and those three are the D3D11 path this stage
+                     needs.
+                  4. Newer development tags exist, 11.18 among them. They are not
+                     used: nothing in this stage needs a fix that is only there,
+                     and a stable tag is the smaller claim.
+
+# What this file does not pin yet, so nobody reads more into it than is there:
+# the Wine build has not been completed by this project. The architecture is
+# supported upstream and the toolchain exists; whether the build succeeds on a
+# macOS arm64 runner is what the workflow answers.
