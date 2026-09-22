@@ -183,49 +183,73 @@ jobs:
           } | tee "$RUNNER_TEMP/configure-architectures.txt"
 
       # Walked up from the smallest module, so that a toolchain failure is told
-      # apart from a module failure. If d3dcompiler_47 cannot cross-compile,
-      # nothing above it will either, and the log says so at the first step
-      # rather than after an hour of d3d11.
-      - name: Build d3dcompiler_47, the smallest PE module
+      # apart from a module failure: if d3dcompiler_47 cannot cross-compile,
+      # nothing above it will either, and the log says so at the first step rather
+      # than after an hour of d3d11.
+      #
+      # Two lessons are built into this step, both from a run that reported success
+      # and produced nothing.
+      #
+      # 1. `make dlls/d3d11` is not how a module is built. make sees the existing
+      #    directory, finds no prerequisites, calls it up to date, and answers
+      #    "Nothing to be done for `dlls/d3d11'." -- with exit status 0. A no-op
+      #    and a build are indistinguishable by exit status, which is how the
+      #    previous run passed two build steps and produced no DLL.
+      # 2. So success is decided by the files that exist afterwards, and never by
+      #    make's status on its own. If nothing was produced, this step says so
+      #    and fails here rather than three steps later.
+      #
+      # The module file is a target make can resolve from the top of the tree
+      # (dlls/<module>/<arch>-windows/<module>.dll), and building the file rather
+      # than the directory also brings its prerequisites with it. Where that is
+      # not a known target, the arch directory's own generated Makefile is used,
+      # and build-plan.txt records which form was tried for each module.
+      - name: Build the D3D11 modules as ARM64EC
         run: |
           set -euo pipefail
           export PATH="$MINGW_ROOT/bin:$PATH"
           cd "$WINE_SRC/build-arm64ec"
-          if ! make -j"$(sysctl -n hw.ncpu)" dlls/d3dcompiler_47 \
-                 > "$RUNNER_TEMP/build-d3dcompiler_47.log" 2>&1; then
-            # Wine's top-level make accepts a subdirectory as a target in recent
-            # versions; configure also generates a Makefile in every directory. If
-            # the first form is refused, the second is tried and the log says
-            # which one produced the result.
-            echo "make dlls/d3dcompiler_47 failed, trying the directory's own Makefile"
-            if ! make -C dlls/d3dcompiler_47 -j"$(sysctl -n hw.ncpu)" \
-                   >> "$RUNNER_TEMP/build-d3dcompiler_47.log" 2>&1; then
-              echo "::error title=d3dcompiler_47 failed to build::see the log in the artifacts"
-              grep -iE 'error|no such file|not found|undefined' "$RUNNER_TEMP/build-d3dcompiler_47.log" | head -30 || true
+          ncpu=$(sysctl -n hw.ncpu)
+          log="$RUNNER_TEMP/build-modules.log"
+          plan="$RUNNER_TEMP/build-plan.txt"
+          : > "$log"
+          : > "$plan"
+
+          for module in d3dcompiler_47 dxgi d3d11; do
+            dirs=$(find "dlls/$module" -maxdepth 1 -type d -name '*arm64ec*' | sort)
+            if [ -z "$dirs" ]; then
+              echo "::error::$module has no arm64ec build directory, so configure never set one up"
+              find "dlls/$module" -maxdepth 1 -mindepth 1 | sort | tee -a "$plan"
               exit 1
             fi
-          fi
-          tail -5 "$RUNNER_TEMP/build-d3dcompiler_47.log"
-          find dlls/d3dcompiler_47 -name '*.dll' -o -name '*.so' | head
-
-      - name: Build dxgi, then d3d11
-        run: |
-          set -euo pipefail
-          export PATH="$MINGW_ROOT/bin:$PATH"
-          cd "$WINE_SRC/build-arm64ec"
-          for module in dxgi d3d11; do
-            if ! make -j"$(sysctl -n hw.ncpu)" "dlls/$module" \
-                   > "$RUNNER_TEMP/build-$module.log" 2>&1; then
-              echo "make dlls/$module failed, trying the directory's own Makefile"
-              if ! make -C "dlls/$module" -j"$(sysctl -n hw.ncpu)" \
-                     >> "$RUNNER_TEMP/build-$module.log" 2>&1; then
-                echo "::error title=$module failed to build::see the log in the artifacts"
-                grep -iE 'error|undefined|not found' "$RUNNER_TEMP/build-$module.log" | head -30 || true
-                exit 1
+            for dir in $dirs; do
+              target="$dir/$module.dll"
+              if make -n "$target" >/dev/null 2>&1; then
+                echo "$module: file target $target" | tee -a "$plan"
+                make -j"$ncpu" "$target" >> "$log" 2>&1 || {
+                  echo "::error title=$module failed to build::see build-modules.log in the artifacts"
+                  tail -40 "$log"
+                  exit 1
+                }
+              else
+                echo "$module: $target is not a known target, using the arch directory Makefile" | tee -a "$plan"
+                make -C "$dir" -j"$ncpu" >> "$log" 2>&1 || {
+                  echo "::error title=$module failed to build::see build-modules.log in the artifacts"
+                  tail -40 "$log"
+                  exit 1
+                }
               fi
-            fi
-            tail -3 "$RUNNER_TEMP/build-$module.log"
+            done
           done
+
+          echo "--- modules produced ---"
+          find dlls/d3dcompiler_47 dlls/dxgi dlls/d3d11 -name '*.dll' | sort \
+            | tee "$RUNNER_TEMP/produced-dlls.txt"
+          test -s "$RUNNER_TEMP/produced-dlls.txt" || {
+            echo "::error title=no DLL was produced::make exited 0 and produced no module, which is what a no-op target looks like. build-plan.txt says which form was tried."
+            tail -40 "$log"
+            exit 1
+          }
 
       # The check the whole job turns on. A DLL is not ARM64EC because the build
       # was asked for ARM64EC; it is ARM64EC because its PE header says 0xA641.
@@ -327,6 +351,8 @@ jobs:
             ${{ runner.temp }}/wine-configure.log
             ${{ runner.temp }}/configure-architectures.txt
             ${{ runner.temp }}/build-*.log
+            ${{ runner.temp }}/build-plan.txt
+            ${{ runner.temp }}/produced-dlls.txt
             ${{ runner.temp }}/pe-machines.txt
             ${{ runner.temp }}/verification.txt
             ${{ runner.temp }}/wine/build-arm64ec/dlls/d3d11/**/*.dll
