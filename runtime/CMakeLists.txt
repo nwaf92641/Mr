@@ -40,10 +40,12 @@ if(APPLE)
   target_sources(mrcore PRIVATE
     platform/apple/mr_host_apple.c
     platform/apple/mr_metal_probe.m
+    platform/apple/mr_metalfx_probe.m
   )
   # PUBLIC because the probe's Foundation and Metal calls are unresolved symbols
   # in a static library: whoever links mrcore has to bring the frameworks.
-  target_link_libraries(mrcore PUBLIC "-framework Foundation" "-framework Metal")
+  target_link_libraries(mrcore PUBLIC "-framework Foundation" "-framework Metal"
+                                      "-framework MetalFX")
 else()
   target_sources(mrcore PRIVATE platform/posix/mr_host_posix.c)
 endif()

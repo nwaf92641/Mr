@@ -1,5 +1,7 @@
 # Where Metal 4 belongs
 
+See `docs/apple-graphics-stack.md` for where each Apple technology sits on the path, what is build-time versus runtime, and what is claimed today.
+
 This answers a question that had to be settled before a line of Metal 4 code was
 written: is a `DXMT -> MR Metal Backend -> Metal 4` layer worth its cost, or does
 it add an abstraction and a translation that the real path does not pay?

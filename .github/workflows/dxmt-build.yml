@@ -205,8 +205,9 @@ jobs:
           clang -O1 -o "$RUNNER_TEMP/mr_gpu_precondition" \
             tests/dxmt/gpu_precondition.m \
             runtime/platform/apple/mr_metal_probe.m \
+            runtime/platform/apple/mr_metalfx_probe.m \
             -Iruntime/platform/apple \
-            -framework Metal -framework Foundation
+            -framework Metal -framework MetalFX -framework Foundation
           set +e
           "$RUNNER_TEMP/mr_gpu_precondition" 2>&1 | tee "$RUNNER_TEMP/gpu-precondition.log"
           status=${PIPESTATUS[0]}

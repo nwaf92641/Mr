@@ -755,6 +755,8 @@ static void test_host_backend_selection(void) {
   mr_host_caps caps;
   mr_host_caps_init(&caps);
   caps.gpu_available = true;
+  /* Real hardware unless a case below says otherwise. */
+  caps.real_apple_gpu = true;
 
   const char *reason = NULL;
   caps.metal4_available = true;
@@ -797,6 +799,33 @@ static void test_host_backend_selection(void) {
   caps.metal3_available = true;
   CHECK_INT(mr_host_pick_backend(&caps, true, &reason), MR_BACKEND_METAL3);
 
+  /*
+   * A device that is present, supports Metal 3, and is not an Apple GPU: the
+   * paravirtual device the CI runner exposes. It must not select a backend, and
+   * it must not be described as a machine without a device, because the two
+   * readings send the diagnosis in opposite directions.
+   */
+  caps.metal3_available = true;
+  caps.real_apple_gpu = false;
+  const char *paravirtual = NULL;
+  CHECK_INT(mr_host_pick_backend(&caps, true, &paravirtual), MR_BACKEND_NONE);
+  CHECK(paravirtual != NULL);
+  CHECK(strcmp(paravirtual, no_device) != 0);
+  CHECK(strstr(paravirtual, "REQUIRES REAL APPLE GPU") != NULL);
+
+  /* The report says the same thing in one place, including the choice. */
+  char report[1024];
+  caps.real_apple_gpu = true;
+  caps.metal4_available = false;
+  CHECK(mr_host_describe_graphics(&caps, report, sizeof(report)) > 0);
+  CHECK(strstr(report, mr_backend_str(MR_BACKEND_METAL3)) != NULL);
+  CHECK(strstr(report, "recommended path") != NULL);
+
+  caps.real_apple_gpu = false;
+  CHECK(mr_host_describe_graphics(&caps, report, sizeof(report)) > 0);
+  CHECK(strstr(report, "REQUIRES REAL APPLE GPU") != NULL);
+  CHECK(strstr(report, "no graphics path can be verified here") != NULL);
+
   mr_test_end();
 }
 
@@ -826,6 +855,19 @@ static mr_host_caps mr_fake_apple_host(void) {
   caps.gpu_available = true;
   caps.metal4_available = true;
   caps.metal3_available = true;
+  /*
+   * A machine called "Apple M2" is real hardware, so it says so. Leaving this
+   * false would describe a paravirtual device wearing an M2's name, and the
+   * planner would then refuse to select a backend for it.
+   */
+  caps.real_apple_gpu = true;
+  /*
+   * MetalFX spatial and temporal, which Apple documents from iOS/iPadOS 16 and
+   * macOS 13. Denoising is left unclaimed: this host asserts only what the
+   * project has checked, and nothing here has checked denoising on an M2.
+   */
+  caps.metalfx_spatial = true;
+  caps.metalfx_temporal = true;
   caps.jit_capable = true;
   caps.jit_enabled = true;
   caps.can_spawn_processes = true;
