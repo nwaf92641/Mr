@@ -312,10 +312,12 @@ jobs:
           for pair in "d3d11:D3D11CreateDevice" "dxgi:CreateDXGIFactory" "d3dcompiler_47:D3DCompile"; do
             module="${pair%%:*}"; symbol="${pair##*:}"
             dll=$(find "dlls/$module" -name '*.dll' | while read -r f; do
-                    if "$MINGW_ROOT/bin/llvm-readobj" --file-headers "$f" | grep -qi ARM64EC; then echo "$f"; fi
+                    # ARM64X is the hybrid Wine emits, and "ARM64X" does not contain
+                    # the string "ARM64EC", so both have to be named here.
+                    if "$MINGW_ROOT/bin/llvm-readobj" --file-headers "$f" | grep -qiE 'ARM64EC|ARM64X'; then echo "$f"; fi
                   done | head -1)
             if [ -z "$dll" ]; then
-              echo "::error::$module has no ARM64EC build, so $symbol cannot be checked in one"
+              echo "::error::$module has no ARM64EC or ARM64X build, so $symbol cannot be checked in one"
               status=1
               continue
             fi
