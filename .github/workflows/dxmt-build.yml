@@ -197,6 +197,107 @@ jobs:
       # probe is broken" cannot be confused for one another. This is the same
       # mr_metal_probe() the Metal conformance test uses, so one function decides
       # what counts as a usable device.
+      # What the binaries depend on, read off the binaries.
+      #
+      # Two questions, and the first one is the reason this step exists. A dylib
+      # that resolves a library out of the directory that built it is broken on
+      # every other machine, and it fails at load time on hardware nobody has run it
+      # on yet. The candidate is a libc++ reached through -L$LLVM_ROOT/lib, so
+      # libc++ is named on its own row rather than left inside the general check.
+      #
+      # The rule applied: a dependency naming the build machine is a FAIL, a
+      # dependency on a system library or an @rpath entry is a PASS. LLVM is
+      # expected to appear, because DXMT's airconv translates DXBC to AIR and links
+      # LLVM to do it, so the question about LLVM is where it resolves to and not
+      # whether it is there.
+      - name: Dependency audit, read off the binaries
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/dxmt-dependencies.txt"
+          : > "$out"
+          fails=0
+          rows=""
+          row() {
+            rows=$(printf '%s| %s | %s | %s |\n' "$rows" "$1" "$2" "$3")
+            if [ "$2" = "FAIL" ]; then fails=$((fails + 1)); fi
+          }
+
+          dylibs=$(find "$DXMT_SRC/build" -type f -name '*.dylib' | sort)
+          test -n "$dylibs" || { echo "::error::no dylib was produced to audit"; exit 1; }
+          count=$(printf '%s\n' "$dylibs" | wc -l | tr -d ' ')
+
+          leaked=0
+          non_arm64=0
+          libcxx="none found"
+          llvm="none found"
+          for dylib in $dylibs; do
+            {
+              echo "### $dylib"
+              file "$dylib"
+              echo "-- install name:"
+              otool -D "$dylib" | tail -1
+              echo "-- rpaths:"
+              otool -l "$dylib" | grep -A2 LC_RPATH | grep -E 'path ' || echo "(none)"
+              echo "-- dependencies:"
+              otool -L "$dylib" | tail -n +2
+              echo ""
+            } >> "$out"
+
+            case "$(file "$dylib")" in
+              *arm64*) ;;
+              *) non_arm64=$((non_arm64 + 1)) ;;
+            esac
+
+            deps=$(otool -L "$dylib" | tail -n +2 | awk '{print $1}')
+            if printf '%s\n' "$deps" | grep -qE '/Users/runner|/private/var/folders|/opt/homebrew'; then
+              leaked=$((leaked + 1))
+            fi
+            if printf '%s\n' "$deps" | grep -q 'libc++'; then
+              libcxx=$(printf '%s\n' "$deps" | grep 'libc++' | sort -u | tr '\n' ' ')
+            fi
+            if printf '%s\n' "$deps" | grep -q 'libLLVM'; then
+              llvm=$(printf '%s\n' "$deps" | grep 'libLLVM' | sort -u | tr '\n' ' ')
+            fi
+          done
+
+          # libc++ is a PASS when it is the system one, reached directly or through
+          # an @rpath the loader resolves to the system one. Anything else is the
+          # vendored-libc++ situation, which has to be decided on purpose.
+          case "$libcxx" in
+            "none found"|"@rpath/libc++"*|"/usr/lib/libc++"*) libcxx_state=PASS ;;
+            *) libcxx_state=FAIL ;;
+          esac
+          row "DXMT architecture arm64" \
+              "$([ "$non_arm64" -eq 0 ] && echo PASS || echo FAIL)" \
+              "$count dylibs, $non_arm64 not arm64"
+          row "No build-path dependency" \
+              "$([ "$leaked" -eq 0 ] && echo PASS || echo FAIL)" \
+              "$leaked dylibs name a path from the build machine"
+          row "libc++ dependency" "$libcxx_state" "$libcxx"
+          row "LLVM dependency" "OBSERVED" "$llvm"
+          row "winemetal.dylib present" \
+              "$([ -f "$DXMT_SRC/build/src/winemetal/winemetal.dylib" ] && echo PASS || echo FAIL)" \
+              "$(find "$DXMT_SRC/build" -name 'winemetal.dylib' -print -quit)"
+          row "Real Apple Silicon GPU" "REQUIRES HARDWARE" "nothing here executed a GPU operation"
+
+          {
+            echo "## Mr dependency audit, read off the binaries"
+            echo ""
+            echo "| | | |"
+            echo "| --- | --- | --- |"
+            printf '%s' "$rows"
+            echo ""
+            echo "OBSERVED is not a pass: the dependency is there, and where it resolves"
+            echo "to is a decision for the packaging stage rather than for this check."
+          } | tee "$RUNNER_TEMP/dxmt-verification.txt"
+          cat "$RUNNER_TEMP/dxmt-verification.txt" >> "$GITHUB_STEP_SUMMARY"
+          cat "$out"
+
+          if [ "$fails" -gt 0 ]; then
+            echo "::error title=$fails dependency row(s) failed::see dxmt-dependencies.txt"
+            exit 1
+          fi
+
       - name: Is there a GPU to verify against?
         env:
           DXMT_SRC: ${{ runner.temp }}/dxmt

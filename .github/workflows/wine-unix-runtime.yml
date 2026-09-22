@@ -151,8 +151,31 @@ jobs:
 
           echo "--- what the Unix side produced ---"
           find loader server dlls/ntdll dlls/win32u \
-            \( -name '*.so' -o -name 'wine64' -o -name 'wineserver' -o -name '*.dylib' \) \
+            \( -name '*.so' -o -name 'wine' -o -name 'wine64' -o -name 'wineserver' \
+               -o -name '*.dylib' \) \
             2>/dev/null | sort | tee "$RUNNER_TEMP/wine-unix-files.txt"
+
+          # Which name Wine gave the loader, read off the disk instead of assumed.
+          # The earlier run checked loader/wine64 only, found nothing, and reported
+          # success, which made "the loader is missing" look like "there was nothing
+          # to start". A missing loader is a prerequisite failing: without it no
+          # module can be loaded and the stage cannot proceed.
+          loader=""
+          for candidate in loader/wine loader/wine64; do
+            if [ -x "$candidate" ]; then
+              echo "loader produced: $candidate"
+              file "$candidate"
+              loader="$candidate"
+              break
+            fi
+            echo "loader candidate absent: $candidate"
+          done
+          if [ -z "$loader" ]; then
+            echo "::error title=no Wine loader was produced::neither loader/wine nor loader/wine64 exists after building the loader target, so nothing downstream can run. This is a failure and not a skip."
+            ls -la loader 2>/dev/null | head -20 || true
+            exit 1
+          fi
+          echo "WINE_LOADER=$loader" >> "$GITHUB_ENV"
 
       - name: What the loader is, as a binary
         run: |
@@ -206,16 +229,23 @@ jobs:
             return "$rc"
           }
 
-          if [ ! -x loader/wine64 ]; then
-            echo "loader/wine64 was not built, so nothing could be started" | tee -a "$out"
-            exit 0
-          fi
+          # The build step already refused to continue without a loader, so an
+          # unset name here means the steps were reordered, not that the loader is
+          # optional.
+          test -n "${WINE_LOADER:-}" || {
+            echo "::error::no loader was recorded by the build step"
+            exit 1
+          }
+          test -x "$WINE_LOADER" || {
+            echo "::error title=the recorded loader is gone::$WINE_LOADER is not executable"
+            exit 1
+          }
 
           set +e
-          run_limited 300 "$out" ./loader/wine64 --version
+          run_limited 300 "$out" "./$WINE_LOADER" --version
           rc=$?
           set -e
-          echo "wine64 --version exit status: $rc" | tee -a "$out"
+          echo "$WINE_LOADER --version exit status: $rc" | tee -a "$out"
           tail -20 "$out"
 
       # The load test: a native arm64 Windows executable that loads d3d11 and
@@ -239,51 +269,86 @@ jobs:
           }
           file "$RUNNER_TEMP/load_d3d11.exe" | tee -a "$out"
 
-          if [ ! -x loader/wine64 ]; then
-            echo "no loader was built, so the test could not be run" | tee -a "$out"
-            exit 0
-          fi
+          test -n "${WINE_LOADER:-}" && test -x "$WINE_LOADER" || {
+            echo "::error::the load test needs the loader recorded by the build step"
+            exit 1
+          }
 
           set +e
-          run_limited 600 "$out" ./loader/wine64 "$RUNNER_TEMP/load_d3d11.exe"
+          run_limited 600 "$out" "./$WINE_LOADER" "$RUNNER_TEMP/load_d3d11.exe"
           rc=$?
           set -e
           echo "load test exit status: $rc" | tee -a "$out"
           tail -30 "$out"
 
+      # The verdict, and the only place this job decides anything.
+      #
+      # PASS is evidence present. FAIL is a prerequisite missing, and a FAIL here
+      # fails the job -- that is the whole point of writing the table. SKIP is only
+      # for what this machine cannot test at all, which in this job means hardware
+      # it does not have, and it is written as REQUIRES HARDWARE. A build failure
+      # and a hardware limit are different answers and this table does not blur
+      # them into one another.
       - name: Verification table
         if: always()
         run: |
           set -euo pipefail
-          have() { [ -e "$1" ] && echo "yes" || echo "no"; }
           cd "$WINE_BUILD"
 
-          loader=$(have loader/wine64)
+          fails=0
+          rows=""
+          row() {
+            rows=$(printf '%s| %s | %s | %s |\n' "$rows" "$1" "$2" "$3")
+            if [ "$2" = "FAIL" ]; then fails=$((fails + 1)); fi
+          }
+          have() { if [ -e "$1" ]; then echo yes; else echo no; fi; }
+          in_log() { # file, pattern
+            if [ -f "$1" ] && grep -q "$2" "$1" 2>/dev/null; then echo yes; else echo no; fi
+          }
+          verdict() { # yes/no -> PASS/FAIL
+            if [ "$1" = yes ]; then echo PASS; else echo FAIL; fi
+          }
+
+          loader="${WINE_LOADER:-}"
+          loader_ok=$(if [ -n "$loader" ] && [ -x "$loader" ]; then echo yes; else echo no; fi)
           ntdll=$(have dlls/ntdll/ntdll.so)
           win32u=$(have dlls/win32u/win32u.so)
           server=$(have server/wineserver)
-          version_ok=$(grep -q 'wine-' "$RUNNER_TEMP/wine-loader-run.txt" \
-            2>/dev/null && echo "yes" || echo "no")
-          load_ok=$(grep -q 'LOAD TEST OK' "$RUNNER_TEMP/wine-load-test.txt" \
-            2>/dev/null && echo "yes" || echo "no")
+          version=$(in_log "$RUNNER_TEMP/wine-loader-run.txt" 'exit status: 0')
+          d3d11=$(in_log "$RUNNER_TEMP/wine-load-test.txt" 'OK   d3d11.dll')
+          dxgi=$(in_log "$RUNNER_TEMP/wine-load-test.txt" 'OK   dxgi.dll')
+          compiler=$(in_log "$RUNNER_TEMP/wine-load-test.txt" 'OK   d3dcompiler_47.dll')
+
+          row "Wine Unix runtime" \
+              "$([ "$ntdll" = yes ] && [ "$win32u" = yes ] && [ "$server" = yes ] && echo PASS || echo FAIL)" \
+              "ntdll.so=$ntdll, win32u.so=$win32u, wineserver=$server"
+          row "Wine loader" "$(verdict "$loader_ok")" "${loader:-neither loader/wine nor loader/wine64 was produced}"
+          row "Wine loader runs" "$(verdict "$version")" "$(tail -1 "$RUNNER_TEMP/wine-loader-run.txt" 2>/dev/null | cut -c1-60)"
+          row "D3D11 runtime load" "$(verdict "$d3d11")" "LoadLibraryA(d3d11.dll) and D3D11CreateDevice"
+          row "DXGI runtime load" "$(verdict "$dxgi")" "LoadLibraryA(dxgi.dll) and CreateDXGIFactory"
+          row "D3DCompile runtime" "$(verdict "$compiler")" "LoadLibraryA(d3dcompiler_47.dll) and D3DCompile"
+          row "DXMT linkage" "NOT STARTED" "after Wine runtime is verified, per the stage order"
+          row "libc++ dependency" "NOT STARTED" "needs otool -L on a built winemetal.dylib"
+          row "Metal 4 command path" "NOT STARTED" "Wine and DXMT first"
+          row "Real Apple Silicon GPU" "REQUIRES HARDWARE" "this runner has no Apple GPU; nothing here is GPU-verified"
+          row "Metal 3 fallback" "DISABLED" "mr_host_pick_backend returns Metal 4 or nothing"
 
           {
             echo "# Mr verification, Wine Unix runtime"
             echo ""
-            echo "| | |"
-            echo "| --- | --- |"
-            echo "| loader/wine64 built | $loader |"
-            echo "| ntdll.so built | $ntdll |"
-            echo "| win32u.so built | $win32u |"
-            echo "| wineserver built | $server |"
-            echo "| loader reports its version | $version_ok |"
-            echo "| Wine loaded d3d11 and resolved D3D11CreateDevice | $load_ok |"
+            echo "| | | |"
+            echo "| --- | --- | --- |"
+            printf '%s' "$rows"
             echo ""
-            echo "A loader that starts is not Wine running a title, and this table does"
-            echo "not pretend otherwise: the row that matters for the graphics path is"
-            echo "the last one, and it is 'no' until Wine reaches a prefix."
+            echo "A loader that starts is not Wine running a title. A DLL that loads is"
+            echo "not a DLL that draws. The rows above say which of those happened."
           } | tee "$RUNNER_TEMP/wine-unix-verification.txt"
           cat "$RUNNER_TEMP/wine-unix-verification.txt" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$fails" -gt 0 ]; then
+            echo "::error title=$fails Wine Unix row(s) failed::see wine-unix-verification.txt. A missing prerequisite is a failure, not a skip."
+            exit 1
+          fi
 
       - name: Upload Wine Unix evidence
         if: always()
