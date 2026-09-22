@@ -199,11 +199,17 @@ jobs:
       #    make's status on its own. If nothing was produced, this step says so
       #    and fails here rather than three steps later.
       #
-      # The module file is a target make can resolve from the top of the tree
-      # (dlls/<module>/<arch>-windows/<module>.dll), and building the file rather
-      # than the directory also brings its prerequisites with it. Where that is
-      # not a known target, the arch directory's own generated Makefile is used,
-      # and build-plan.txt records which form was tried for each module.
+      # Three forms were tried before this one, and each one's answer is now known,
+      # so nobody has to try them again:
+      #
+      #   make dlls/<module>                        Nothing to be done, exit 0
+      #   make dlls/<module>/<arch>-windows/<module>.dll
+      #                                            no rule to make that target
+      #   make -C dlls/<module>/<arch>-windows       no makefile found there
+      #
+      # What builds a module is the module's own generated Makefile, which builds
+      # it for every arch configure set up and writes into the <arch>-windows
+      # directories beside it. build-plan.txt records which arches each module has.
       - name: Build the D3D11 modules as ARM64EC
         run: |
           set -euo pipefail
@@ -216,30 +222,18 @@ jobs:
           : > "$plan"
 
           for module in d3dcompiler_47 dxgi d3d11; do
-            dirs=$(find "dlls/$module" -maxdepth 1 -type d -name '*arm64ec*' | sort)
-            if [ -z "$dirs" ]; then
-              echo "::error::$module has no arm64ec build directory, so configure never set one up"
+            if [ ! -f "dlls/$module/Makefile" ]; then
+              echo "::error::dlls/$module has no generated Makefile, and that is what builds a module"
               find "dlls/$module" -maxdepth 1 -mindepth 1 | sort | tee -a "$plan"
               exit 1
             fi
-            for dir in $dirs; do
-              target="$dir/$module.dll"
-              if make -n "$target" >/dev/null 2>&1; then
-                echo "$module: file target $target" | tee -a "$plan"
-                make -j"$ncpu" "$target" >> "$log" 2>&1 || {
-                  echo "::error title=$module failed to build::see build-modules.log in the artifacts"
-                  tail -40 "$log"
-                  exit 1
-                }
-              else
-                echo "$module: $target is not a known target, using the arch directory Makefile" | tee -a "$plan"
-                make -C "$dir" -j"$ncpu" >> "$log" 2>&1 || {
-                  echo "::error title=$module failed to build::see build-modules.log in the artifacts"
-                  tail -40 "$log"
-                  exit 1
-                }
-              fi
-            done
+            archdirs=$(find "dlls/$module" -maxdepth 1 -type d -name '*-windows' | sort | tr '\n' ' ')
+            echo "$module: make -C dlls/$module  [archs: $archdirs]" | tee -a "$plan"
+            make -C "dlls/$module" -j"$ncpu" >> "$log" 2>&1 || {
+              echo "::error title=$module failed to build::see build-modules.log in the artifacts"
+              tail -40 "$log"
+              exit 1
+            }
           done
 
           echo "--- modules produced ---"
