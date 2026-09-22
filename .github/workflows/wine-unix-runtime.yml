@@ -302,19 +302,25 @@ jobs:
           win32u=$(have dlls/win32u/win32u.so)
           server=$(have server/wineserver)
           # The verdict reads the status files the diagnostic wrote, not the fact
-          # that some step finished.
+          # that some step finished. Each configuration has its own directory, so a
+          # status cannot be lost between a run and its log.
+          configs="plain dyld_trace with_dllpath with_prefix help"
           status_of() {
-            f="$RUNNER_TEMP/loader-diag/$1.status"
+            f="$RUNNER_TEMP/loader-diag/$1/status"
             if [ -f "$f" ] && [ "$(cat "$f")" = 0 ]; then echo yes; else echo no; fi
           }
           version=no
-          for config in with_dllpath with_prefix plain debug_off help; do
+          for config in $configs; do
             if [ "$(status_of "$config")" = yes ]; then version=yes; break; fi
           done
-          stuck=$(for config in plain with_dllpath with_prefix debug_off help; do
-                    f="$RUNNER_TEMP/loader-diag/$config.status"
+          stuck=$(for config in $configs; do
+                    f="$RUNNER_TEMP/loader-diag/$config/status"
                     [ -f "$f" ] && printf '%s=%s ' "$config" "$(cat "$f")"
                   done)
+          loaded_any=$(for config in $configs; do
+                         f="$RUNNER_TEMP/loader-diag/$config/stdout"
+                         [ -s "$f" ] && printf '%s ' "$config"
+                       done)
           d3d11=$(in_log "$RUNNER_TEMP/wine-load-test.txt" 'OK   d3d11.dll')
           dxgi=$(in_log "$RUNNER_TEMP/wine-load-test.txt" 'OK   dxgi.dll')
           compiler=$(in_log "$RUNNER_TEMP/wine-load-test.txt" 'OK   d3dcompiler_47.dll')
@@ -323,7 +329,10 @@ jobs:
               "$([ "$ntdll" = yes ] && [ "$win32u" = yes ] && [ "$server" = yes ] && echo PASS || echo FAIL)" \
               "ntdll.so=$ntdll, win32u.so=$win32u, wineserver=$server"
           row "Wine loader" "$(verdict "$loader_ok")" "${loader:-neither loader/wine nor loader/wine64 was produced}"
-          row "Wine loader runs" "$(verdict "$version")" "${stuck:-no configuration was run}"
+          row "Wine loader runs" "$(verdict "$version")" "statuses: ${stuck:-no configuration ran}"
+          row "Wine loader prints anything" \
+              "$([ -n "$loaded_any" ] && echo PASS || echo FAIL)" \
+              "stdout non-empty in: ${loaded_any:-none}"
           row "D3D11 runtime load" "$(verdict "$d3d11")" "LoadLibraryA(d3d11.dll) and D3D11CreateDevice"
           row "DXGI runtime load" "$(verdict "$dxgi")" "LoadLibraryA(dxgi.dll) and CreateDXGIFactory"
           row "D3DCompile runtime" "$(verdict "$compiler")" "LoadLibraryA(d3dcompiler_47.dll) and D3DCompile"

@@ -25,6 +25,7 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -36,15 +37,12 @@ static void kv_bool(const char *key, bool value) {
   kv(key, value ? "yes" : "no");
 }
 
-/* A name this code cannot name at compile time, because it might not be in the
- * SDK. Looking it up costs nothing and answers the question directly. */
+/* A name this code cannot name at compile time, because it might not be in the SDK
+ * this is built against. Looking it up as a string answers the question directly
+ * and cannot be wrong about a signature. */
 static void report_class(const char *name) {
   Class c = NSClassFromString([NSString stringWithUTF8String:name]);
-  if (c != nil) {
-    printf("sdk_class.%s=present\n", name);
-  } else {
-    printf("sdk_class.%s=absent\n", name);
-  }
+  printf("sdk_class.%s=%s\n", name, c != nil ? "present" : "absent");
 }
 
 static void report_selector(id object, const char *name) {
@@ -54,10 +52,6 @@ static void report_selector(id object, const char *name) {
   } else {
     printf("device_selector.%s=no\n", name);
   }
-}
-
-static void report_header(const char *name, int present) {
-  printf("header.%s=%s\n", name, present ? "present" : "absent");
 }
 
 int main(void) {
@@ -84,22 +78,23 @@ int main(void) {
      * build-time half of the answer, and a wrong guess shows up here as absent
      * rather than as a compile error three files away.
      */
-    printf("\n## candidate headers in this SDK\n");
-    report_header("Metal/MTL4CommandQueue.h",
-                  __has_include(<Metal/MTL4CommandQueue.h>));
-    report_header("Metal/MTL4CommandBuffer.h",
-                  __has_include(<Metal/MTL4CommandBuffer.h>));
-    report_header("Metal/MTL4CommandAllocator.h",
-                  __has_include(<Metal/MTL4CommandAllocator.h>));
-    report_header("Metal/MTL4RenderCommandEncoder.h",
-                  __has_include(<Metal/MTL4RenderCommandEncoder.h>));
-    report_header("Metal/MTL4ComputeCommandEncoder.h",
-                  __has_include(<Metal/MTL4ComputeCommandEncoder.h>));
-    report_header("Metal/MTL4ArgumentTable.h",
-                  __has_include(<Metal/MTL4ArgumentTable.h>));
-    report_header("Metal/MTL4Compiler.h",
-                  __has_include(<Metal/MTL4Compiler.h>));
-    report_header("Metal/MTL4Pipeline.h", __has_include(<Metal/MTL4Pipeline.h>));
+    /*
+     * __has_include is a preprocessing operator, not a function. The first version
+     * of this file passed it to a function and the compiler rejected it outright --
+     * "must be used within a preprocessing directive" -- so the probe never ran and
+     * the job failed on the compile. The lesson is the project's own rule: a probe
+     * that cannot be built cannot measure anything, and the failure looks like a
+     * verdict about Metal 4 when it is a syntax error.
+     *
+     * One candidate is asked here rather than the whole list. The workflow's own
+     * step tests all 31 MTL4 headers individually and reports each one, which is
+     * the better measurement, and duplicating it here only added a way to fail.
+     */
+#if __has_include(<Metal/MTL4CommandQueue.h>)
+    kv_bool("compile_time.mtl4_command_queue_header", true);
+#else
+    kv_bool("compile_time.mtl4_command_queue_header", false);
+#endif
 
     printf("\n## candidate class names at runtime\n");
     report_class("MTL4CommandQueue");

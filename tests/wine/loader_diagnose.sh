@@ -2,27 +2,21 @@
 # What the Wine loader does when it does not return.
 #
 # The loader builds, is a correct arm64 Mach-O, and prints nothing at all before
-# being killed at 300 seconds. A process that produces no output and does not exit
-# is blocked before its first line, and the reason is in the kernel or in the
-# loader's own startup, not in anything Wine would have said.
+# being killed. A process that has produced no output is blocked before its first
+# line, so the answer is in the kernel or in the loader's own startup rather than in
+# anything Wine would have said.
 #
-# So this script does four things the earlier step did not:
-#
-#   1. It waits a short, fixed time and then looks at where the process actually
-#      is: ps for the state, lsof for the files and sockets it holds, and sample(1)
-#      for a stack trace of what it is executing while stuck.
-#   2. It keeps stdout and stderr separate, so "printed nothing" is a fact rather
-#      than an absence.
-#   3. It runs the same command in several configurations and records each one, so
-#      a difference between them is evidence about the cause instead of a guess.
-#   4. It writes a status file per configuration. It never exits non-zero because a
-#      probe failed: the caller computes the verdict from the statuses, and a
-#      verdict computed from evidence is the only kind this project takes.
+# The first version of this script wrote the state into the same file as the later
+# sections, and the state went missing from the artifact while the status said 137.
+# This version keeps one directory per run, writes each measurement into its own
+# file, and assembles the log last from those files, so no section can be absent
+# without the file itself being absent. Nothing is inferred from a command that may
+# not have run.
 #
 # Usage: loader_diagnose.sh <loader-relative-path> <wine-build-dir> <output-dir>
 #
-# Deliberately no `set -e`: every probe here is allowed to fail. What is not
-# allowed is failing silently.
+# No `set -e`: every probe here is allowed to fail, and what is not allowed is
+# failing silently.
 
 loader="$1"
 build="$2"
@@ -36,59 +30,49 @@ mkdir -p "$out"
 cd "$build" || exit 2
 
 echo "== what is being diagnosed =="
-echo "loader: $build/$loader"
-ls -la "$loader" 2>&1 || echo "the loader path does not exist"
+ls -la "$loader" 2>&1 || echo "MISSING: $loader"
 file "$loader" 2>&1 || true
-echo "otool -L:"
 otool -L "$loader" 2>&1 || true
-
-# The Unix modules the loader has to find, and where they are.
 echo
-echo "== the modules the loader needs =="
+echo "== the modules the loader has to find =="
 for module in dlls/ntdll/ntdll.so dlls/win32u/win32u.so server/wineserver; do
-  if [ -e "$module" ]; then
-    ls -la "$module"
-    file "$module"
-  else
-    echo "$module: MISSING"
-  fi
+  if [ -e "$module" ]; then ls -la "$module"; else echo "$module: MISSING"; fi
 done
 
-# Wine is run from a build tree here, which is not the layout it searches by
-# default. Both halves are given: the directory holding the unix .so files, and the
-# directories holding the PE modules.
 pe_dirs=$(find dlls -maxdepth 2 -type d -name '*-windows' 2>/dev/null | sort | tr '\n' ':')
-unix_dirs="dlls/ntdll:dlls/win32u"
-dllpath="$unix_dirs:$pe_dirs"
+dllpath="dlls/ntdll:dlls/win32u:$pe_dirs"
 echo
-echo "== WINEDLLPATH for the build tree =="
-echo "$dllpath" | tr ':' '\n' | sed '/^$/d' | while read -r d; do
-  printf '  %s (%s files)\n' "$d" "$(ls "$d" 2>/dev/null | wc -l | tr -d ' ')"
-done
+echo "== sample(1) available: $(command -v sample >/dev/null 2>&1 && echo yes || echo no) =="
 
-# One configuration: run it, wait, and if it is still alive say where it is.
-# seconds=0 means wait until it exits.
-probe() {
+env_snapshot() {
+  echo "WINEDEBUG=${WINEDEBUG-<unset>}"
+  echo "WINEDLLPATH=${WINEDLLPATH-<unset>}"
+  echo "WINEPREFIX=${WINEPREFIX-<unset>}"
+  echo "WINELOADER=${WINELOADER-<unset>}"
+  echo "DYLD_PRINT_INITIALIZERS=${DYLD_PRINT_INITIALIZERS-<unset>}"
+  echo "DYLD_PRINT_LIBRARIES=${DYLD_PRINT_LIBRARIES-<unset>}"
+  echo "cwd=$(pwd)"
+}
+
+# Run one configuration, watch it, and if it is still alive ask it where it is
+# while it is still there to be asked.
+run_case() {
   label="$1"
   seconds="$2"
   shift 2
+  dir="$out/$label"
+  mkdir -p "$dir"
+  : > "$dir/stdout"
+  : > "$dir/stderr"
+  : > "$dir/sample.txt"
+  : > "$dir/state"
+  : > "$dir/ps.txt"
+  : > "$dir/lsof.txt"
+  : > "$dir/wine-tmp.txt"
+  env_snapshot > "$dir/env.txt"
 
-  stdout="$out/$label.stdout"
-  stderr="$out/$label.stderr"
-  log="$out/$label.txt"
-  : > "$stdout"
-  : > "$stderr"
-  {
-    echo "label: $label"
-    echo "argv: $*"
-    echo "WINEDEBUG=${WINEDEBUG-<unset>}"
-    echo "WINEDLLPATH=${WINEDLLPATH-<unset>}"
-    echo "WINEPREFIX=${WINEPREFIX-<unset>}"
-    echo "WINELOADER=${WINELOADER-<unset>}"
-    echo "cwd: $(pwd)"
-  } > "$log"
-
-  "$@" > "$stdout" 2> "$stderr" &
+  echo "--- $label: $*"
+  "$@" > "$dir/stdout" 2> "$dir/stderr" &
   pid=$!
 
   waited=0
@@ -98,81 +82,80 @@ probe() {
   done
 
   if kill -0 "$pid" 2>/dev/null; then
-    echo "state: STILL RUNNING after ${seconds}s" >> "$log"
-    {
-      echo "--- ps -o pid,ppid,stat,wchan,command:"
-      ps -o pid,ppid,stat,wchan,command -p "$pid" 2>&1
-    } >> "$log"
-    {
-      echo "--- what it has open (lsof -p):"
-      lsof -p "$pid" 2>&1 | head -40
-    } > "$out/$label.lsof.txt"
+    echo "STILL RUNNING after ${seconds}s; stopped by this script" > "$dir/state"
+    # %cpu and cpu time separate a process blocked in the kernel from one spinning.
+    ps -o pid,ppid,stat,%cpu,time,wchan,command -p "$pid" > "$dir/ps.txt" 2>&1 || true
+    ls -l /tmp 2>/dev/null | grep -i wine > "$dir/wine-tmp.txt" 2>&1 || true
+    lsof -p "$pid" > "$dir/lsof.txt" 2>&1 || true
     if command -v sample >/dev/null 2>&1; then
-      echo "--- sample $pid 3 (a stack trace of where it is stuck):" >> "$log"
-      sample "$pid" 3 -file "$out/$label.sample.txt" >> "$log" 2>&1 || true
-      if [ -f "$out/$label.sample.txt" ]; then
-        echo "--- the frames it is executing:" >> "$log"
-        grep -A12 'Call graph' "$out/$label.sample.txt" 2>/dev/null | head -20 >> "$log"
-      fi
+      sample "$pid" 3 -file "$dir/sample.txt" > "$dir/sample.log" 2>&1 || true
     else
-      echo "sample(1) is not available on this machine" >> "$log"
+      echo "sample(1) is not available on this machine" > "$dir/sample.txt"
     fi
     kill -9 "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
-    echo "137" > "$out/$label.status"
-    echo "status: 137 (SIGKILL from this script's own limit, so the number says the process did not return and nothing more)"
+    echo 137 > "$dir/status"
   else
     wait "$pid"
     rc=$?
-    echo "$rc" > "$out/$label.status"
-    echo "state: exited on its own with status $rc"
+    echo "exited with status $rc" > "$dir/state"
+    echo "$rc" > "$dir/status"
   fi
 
   {
-    echo "--- stdout ($(wc -c < "$stdout" | tr -d ' ') bytes):"
-    cat "$stdout"
-    echo "--- stderr ($(wc -c < "$stderr" | tr -d ' ') bytes):"
-    cat "$stderr"
-  } >> "$log"
+    echo "== $label"
+    echo "argv: $*"
+    cat "$dir/env.txt"
+    echo "state: $(cat "$dir/state")"
+    echo "status: $(cat "$dir/status")"
+    echo "--- stdout ($(wc -c < "$dir/stdout" | tr -d ' ') bytes)"
+    cat "$dir/stdout"
+    echo "--- stderr ($(wc -c < "$dir/stderr" | tr -d ' ') bytes)"
+    cat "$dir/stderr"
+    echo "--- ps -o pid,ppid,stat,%cpu,time,wchan,command"
+    cat "$dir/ps.txt"
+    echo "--- wine files in /tmp"
+    cat "$dir/wine-tmp.txt"
+    echo "--- lsof -p (first 25 lines)"
+    head -25 "$dir/lsof.txt"
+    echo "--- sample: $(wc -c < "$dir/sample.txt" | tr -d ' ') bytes"
+    head -45 "$dir/sample.txt"
+  } > "$dir/log.txt"
+
+  echo "    $(cat "$dir/state"); stdout $(wc -c < "$dir/stdout" | tr -d ' ') bytes, stderr $(wc -c < "$dir/stderr" | tr -d ' ') bytes"
 }
 
 echo
-echo "== configuration 1: the way the earlier step ran it, no module path =="
-( unset WINEDLLPATH; unset WINEPREFIX; probe plain 30 "./$loader" --version )
+echo "== 1. plain, the way the earlier step ran it =="
+( unset WINEDLLPATH; unset WINEPREFIX; unset DYLD_PRINT_INITIALIZERS; unset DYLD_PRINT_LIBRARIES; run_case plain 30 "./$loader" --version )
 
-echo
-echo "== configuration 2: with WINEDEBUG=-all, to rule logging out =="
-( unset WINEDLLPATH; unset WINEPREFIX; WINEDEBUG=-all probe debug_off 30 "./$loader" --version )
+echo "== 2. with dyld tracing, to see whether the dynamic loader reaches Wine at all =="
+( unset WINEDLLPATH; unset WINEPREFIX; WINEDEBUG=-all DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_LIBRARIES=1 run_case dyld_trace 30 "./$loader" --version )
 
-echo
-echo "== configuration 3: with WINEDLLPATH pointing at this build tree =="
-( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" probe with_dllpath 30 "./$loader" --version )
+echo "== 3. with WINEDLLPATH naming this build tree's modules =="
+( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" run_case with_dllpath 30 "./$loader" --version )
 
-echo
-echo "== configuration 4: a prefix that already exists, as a runtime would have =="
-( mkdir -p "$out/prefix"; WINEDEBUG=-all WINEDLLPATH="$dllpath" WINEPREFIX="$out/prefix" probe with_prefix 30 "./$loader" --version )
+echo "== 4. with a prefix that already exists =="
+( mkdir -p "$out/prefix"; WINEDEBUG=-all WINEDLLPATH="$dllpath" WINEPREFIX="$out/prefix" run_case with_prefix 30 "./$loader" --version )
 
-echo
-echo "== configuration 5: --help, in case the argument path is the problem =="
-( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" probe help 30 "./$loader" --help )
+echo "== 5. --help, in case only the argument path is at fault =="
+( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" run_case help 30 "./$loader" --help )
 
 echo
 echo "== statuses =="
-for status in "$out"/*.status; do
-  [ -e "$status" ] || continue
-  printf '%-14s %s\n' "$(basename "$status" .status)" "$(cat "$status")"
+ran=""
+for case_dir in "$out"/plain "$out"/dyld_trace "$out"/with_dllpath "$out"/with_prefix "$out"/help; do
+  [ -d "$case_dir" ] || continue
+  label=$(basename "$case_dir")
+  status=$(cat "$case_dir/status" 2>/dev/null || echo "?")
+  bytes=$(wc -c < "$case_dir/stdout" 2>/dev/null | tr -d ' ')
+  printf '%-13s status=%-5s stdout=%s bytes  %s\n' "$label" "$status" "${bytes:-0}" "$(cat "$case_dir/state" 2>/dev/null)"
+  if [ "$status" = "0" ] && [ "${bytes:-0}" -gt 0 ]; then ran="$ran $label"; fi
 done
 
-# One configuration returning 0 is the loader working, and configuration 3 is the
-# one a runtime would use: a build tree with its module path set. The caller reads
-# this file rather than re-deriving it.
-if [ -f "$out/with_dllpath.status" ] && [ "$(cat "$out/with_dllpath.status")" = "0" ]; then
-  echo "verdict: the loader runs when told where its modules are"
+if [ -n "$ran" ]; then
+  echo "verdict: the loader returned with output in:$ran" | tee "$out/verdict.txt"
   exit 0
 fi
-if [ -f "$out/plain.status" ] && [ "$(cat "$out/plain.status")" = "0" ]; then
-  echo "verdict: the loader runs with no module path, which is better than expected"
-  exit 0
-fi
-echo "verdict: the loader did not return in any configuration"
+echo "verdict: the loader produced no output and did not return in any configuration" | tee "$out/verdict.txt"
 exit 1
