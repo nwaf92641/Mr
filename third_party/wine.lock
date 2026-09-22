@@ -1,0 +1,87 @@
+# Wine, pinned. Read by .github/workflows/wine-arm64ec-build.yml, and by anyone
+# reading this file, so every value here is a fact that was checked.
+
+repository      = https://github.com/wine-mirror/wine
+upstream        = https://gitlab.winehq.org/wine/wine
+tag             = wine-11.18
+tag_object      = ccf4f04c3d4b58856e9e6db6e202409622420d5e
+commit          = 7b3fff76fa5178f6ce0141b2c776afa2a822f101
+commit_date     = 2026-09-18T20:36:23Z
+commit_subject  = Release 11.18.
+license         = LGPL-2.1-or-later
+
+                  Wine's licence is LGPL-2.1-or-later, per its LICENSE file. Only
+                  the upstream tree is used here: no fork, and no patch series.
+                  Madeira, which is the reference for this architecture, builds
+                  Wine from a fork (willfaust/wine, branch ios-build). That fork
+                  is a GPL-3.0 project's component and is not used or copied. No
+                  patch of any kind is applied to this tree: the one source change
+                  this project needed, the __fastfail guard, is upstream's own.
+
+                  The commit is recorded, not the tag object. `git ls-remote`
+                  prints the annotated tag's own object first, and pinning that
+                  would pin a tag message rather than a tree.
+
+# Architecture is two different things in one build, and conflating them is the
+# mistake this file exists to prevent.
+#
+#   unix side   arm64, macOS. The loader and the .so modules (ntdll.so,
+#               win32u.so, the graphics driver) are Mach-O arm64, built by the
+#               host clang for the machine they run on.
+#   PE side     arm64ec and aarch64. The Windows modules are PE files built by
+#               llvm-mingw. ARM64EC is a distinct PE machine type, 0xA641, not
+#               arm64 with a flag -- which is why the workflow reads the machine
+#               type out of every DLL it produces instead of trusting that a
+#               cross build did what the flags asked. A DLL built for aarch64
+#               (0xAA64) where ARM64EC was wanted would link and would not run.
+#
+architectures   = host_unix:arm64
+                  pe:arm64ec
+                  pe:aarch64
+                  pe:x86_64        (extra arch: configure requires it for arm64ec)
+
+# PE toolchain. llvm-mingw is what Wine's configure probes for
+# (arm64ec-w64-mingw32-clang, arm64ec-w64-mingw32-gcc, or clang), and it is the
+# only toolchain that ships an arm64ec target for macOS hosts.
+#
+# Pinned by version, not by digest. The workflow prints the SHA-256 it computes
+# for the downloaded archive, and that value belongs here once it has been seen.
+# Writing a digest nobody has checked would be an invented fact in a file whose
+# whole purpose is to hold checked ones.
+mingw           = mstorsjo/llvm-mingw
+mingw_version   = 20260908
+mingw_asset     = llvm-mingw-20260908-ucrt-macos-universal.tar.xz
+
+# Why this version, in order of weight.
+reason          = 1. The earlier pin, wine-11.0, does not cross-compile for
+                     arm64ec. include/winnt.h there defines __fastfail with
+                     `#if defined(__x86_64__) || defined(__i386__)` first and the
+                     aarch64 branch second, and clang's arm64ec target defines
+                     both macros, so an arm64ec build takes the x86 path and
+                     clang rejects the x86 constraint:
+
+                       winnt.h:7538:51: error: invalid input constraint 'c' in asm
+                       for (;;) __asm__ __volatile__( "int $0x29" :: "c" ...
+
+                     That was read out of a build log, not guessed. This tag has
+                     the branches the other way round, and names __arm64ec__
+                     explicitly -- both facts were read from the tag's source
+                     before it was pinned:
+
+                       #if defined(__aarch64__) || defined(__arm64ec__)
+                         ... brk #0xf003 ...
+                       #elif defined(__x86_64__) || defined(__i386__)
+
+                     So the pin moved to a version whose source has the right
+                     guard, rather than carrying a patch that re-does what
+                     upstream already did.
+                  2. Candidates newer than this one were checked, not assumed:
+                     the guard was read out of each tag and the newest tag that
+                     has it was taken.
+                  3. dlls/d3d11, dlls/dxgi and dlls/d3dcompiler_47 all exist at
+                     this tag, as they did at wine-11.0.
+
+# What this file does not pin yet, so nobody reads more into it than is there:
+# the Wine build has not been completed by this project. The architecture is
+# supported upstream and the toolchain exists; whether the build succeeds on a
+# macOS arm64 runner is what the workflow answers.
