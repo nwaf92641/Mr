@@ -158,25 +158,41 @@ bool mr_host_can_translate_x86(const mr_host_caps *caps) {
   return true;
 }
 
+/*
+ * Metal 4 or nothing.
+ *
+ * This function used to prefer Metal 4 and fall back to Metal 3, and the fallback
+ * is gone on purpose. Mr is an Apple Silicon runtime whose graphics target is
+ * Metal 4: Metal 3 is not a runtime path here, it is the conformance harness in
+ * runtime/metal/ and a comparison point. A fallback that quietly gave a Metal 3
+ * frame path would hide exactly the thing this project needs to see -- that Metal 4
+ * is not working on this device, or on this OS, or in this build -- and the failure
+ * would then be reported as success by the layer above.
+ *
+ * So every path out of here either selects Metal 4 or names the reason there is no
+ * target. The reasons are the deliverable: "UNSUPPORTED TARGET" with the fact that
+ * decided it, never a backend the caller did not ask for.
+ */
 mr_backend mr_host_pick_backend(const mr_host_caps *caps, bool allow_metal4,
                                 const char **reason) {
   static const char *k_no_gpu = "no Metal device is available to this process";
-  static const char *k_no_metal3_family =
-      "a Metal device exists but does not support the Metal 3 GPU family, so it "
-      "cannot run the frame path (a paravirtual GPU reports no families at all, "
-      "which is what a VM without GPU passthrough looks like)";
-  static const char *k_disabled =
-      "Metal 4 is supported by this device but disabled in the game profile";
-  static const char *k_os =
-      "the operating system predates Metal 4 (iPadOS/macOS 26 or later)";
-  static const char *k_probe =
-      "the device did not return an MTL4 command queue, so this GPU or OS "
-      "combination has no Metal 4 support";
-  static const char *k_chosen = "this device and OS support Metal 4";
   static const char *k_paravirtual =
       "the only Metal device is a paravirtual device, which is a device and not "
       "an Apple GPU: this machine can build the graphics path and cannot verify "
       "it, so REQUIRES REAL APPLE GPU VALIDATION";
+  static const char *k_metal4_disabled =
+      "Metal 4 is disabled in this profile, and it is the only graphics target "
+      "this runtime has: there is no Metal 3 path to fall back to, so nothing was "
+      "selected. UNSUPPORTED TARGET";
+  static const char *k_os =
+      "the operating system predates Metal 4, which needs macOS or iPadOS 26 or "
+      "later. Metal 3 is not a runtime path for this project, so nothing was "
+      "selected. UNSUPPORTED TARGET";
+  static const char *k_probe =
+      "the device did not return an MTL4 command queue, so this GPU or OS "
+      "combination has no Metal 4 support. Metal 3 is not a runtime path for this "
+      "project, so nothing was selected. UNSUPPORTED TARGET";
+  static const char *k_chosen = "this device and OS support Metal 4";
 
   if (reason != NULL) *reason = NULL;
   if (caps == NULL) {
@@ -189,53 +205,45 @@ mr_backend mr_host_pick_backend(const mr_host_caps *caps, bool allow_metal4,
   }
 
   /*
-   * A paravirtual device before the family checks: it reports no family, so the
-   * Metal 3 branch below would describe it as a device that cannot do Metal 3,
-   * which is true and not the useful sentence. The useful sentence is that this
-   * machine has no GPU to verify against.
+   * A paravirtual device before anything else. It reports no GPU family and no
+   * Metal 4 queue, so the Metal 4 checks below would describe it as a device that
+   * cannot do Metal 4, which is true and not the useful sentence. The useful one is
+   * that this machine has no GPU to verify against.
    */
   if (!caps->real_apple_gpu) {
     if (reason != NULL) *reason = k_paravirtual;
     return MR_BACKEND_NONE;
   }
 
-  if (!allow_metal4) {
-    if (reason != NULL) *reason = k_disabled;
-    return caps->metal3_available ? MR_BACKEND_METAL3 : MR_BACKEND_NONE;
-  }
-  if (!caps->metal3_available) {
-    /*
-     * This used to say "no Metal device is available to this process", on the
-     * reasoning that Metal 4 cannot exist without Metal 3 support so a missing
-     * Metal 3 family must mean no Metal. The arm64 macOS CI run showed what that
-     * costs: the probe saw "macOS Apple Paravirtual device" -- a device, visible,
-     * with gpu family 0 -- and the runtime then told the reader there was no
-     * device at all. The two situations need different sentences, because only
-     * one of them is worth looking for hardware over.
-     */
-    if (reason != NULL) *reason = k_no_metal3_family;
+  /*
+   * The device and OS facts come before the profile setting, because a profile
+   * cannot enable something the hardware does not have, and answering a hardware
+   * question with "you turned it off" sends the reader to the wrong place.
+   *
+   * "Too old" and "present in the SDK but refused here" are kept apart: only one of
+   * them is worth updating a machine over.
+   */
+  if (!caps->metal4_available) {
+    if (reason != NULL) {
+      int major = 0;
+      if (caps->os_version[0] >= '0' && caps->os_version[0] <= '9') {
+        major = caps->os_version[0] - '0';
+        if (caps->os_version[1] >= '0' && caps->os_version[1] <= '9') {
+          major = major * 10 + (caps->os_version[1] - '0');
+        }
+      }
+      *reason = (major > 0 && major < 26) ? k_os : k_probe;
+    }
     return MR_BACKEND_NONE;
   }
-  if (caps->metal4_available) {
-    if (reason != NULL) *reason = k_chosen;
-    return MR_BACKEND_METAL4;
+
+  if (!allow_metal4) {
+    if (reason != NULL) *reason = k_metal4_disabled;
+    return MR_BACKEND_NONE;
   }
 
-  /*
-   * Distinguish "too old" from "present in the SDK but refused here", because
-   * the two lead to different advice and only one of them is the user's fault.
-   */
-  if (reason != NULL) {
-    int major = 0;
-    if (caps->os_version[0] >= '0' && caps->os_version[0] <= '9') {
-      major = caps->os_version[0] - '0';
-      if (caps->os_version[1] >= '0' && caps->os_version[1] <= '9') {
-        major = major * 10 + (caps->os_version[1] - '0');
-      }
-    }
-    *reason = (major > 0 && major < 26) ? k_os : k_probe;
-  }
-  return MR_BACKEND_METAL3;
+  if (reason != NULL) *reason = k_chosen;
+  return MR_BACKEND_METAL4;
 }
 
 /* ------------------------------------------------------------ jit self-test */
@@ -327,6 +335,8 @@ size_t mr_host_describe_graphics(const mr_host_caps *caps, char *out,
                    "  GPU family ......... %d\n"
                    "  unified memory ..... %s\n"
                    "  MetalFX ............ spatial %s, temporal %s, denoise %s\n"
+                   "  target ............. Metal 4, and there is no Metal 3 runtime "
+                   "path\n"
                    "  recommended path ... %s\n"
                    "  because ............ %s\n",
                    caps->gpu_available ? "yes" : "no",

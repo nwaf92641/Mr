@@ -369,7 +369,16 @@ static void mr_plan_graphics(mr_launch_plan *plan, const mr_game_facts *facts,
 
   bool allow_metal4 = mr_profile_get_bool(profile, "allow_metal4", true);
   const char *force = mr_profile_get(profile, "backend");
-  if (force != NULL && mr_str_iequal(force, "metal3")) allow_metal4 = false;
+  if (force != NULL && mr_str_iequal(force, "metal3")) {
+    /*
+     * There is no Metal 3 runtime path to force. This used to switch the runtime
+     * onto one, which meant a profile could quietly move a title off Metal 4 and a
+     * plan would look healthy while the target it claims to test was not running.
+     * The setting still has an effect, and the effect is a refusal: the profile
+     * asks for something this runtime does not have, and the reader is told so.
+     */
+    allow_metal4 = false;
+  }
 
   const char *reason = NULL;
   plan->backend = mr_host_pick_backend(host, allow_metal4, &reason);
@@ -377,6 +386,18 @@ static void mr_plan_graphics(mr_launch_plan *plan, const mr_game_facts *facts,
                        "%s", reason != NULL ? reason : "no reason recorded");
 
   plan->graphics_enabled = (plan->backend != MR_BACKEND_NONE);
+
+  /*
+   * A blocked graphics path is a blocker and not only a decision. The decision
+   * list is what a reader studies; the blocker list is what the runtime and the
+   * interface act on, and a title whose graphics target does not exist has to be
+   * visible in it or the launch proceeds and fails somewhere deeper.
+   */
+  if (!plan->graphics_enabled) {
+    (void)mr_plan_add_blocker(
+        plan, "no graphics target: %s",
+        reason != NULL ? reason : "the host reported no reason");
+  }
 
   /*
    * Feature level. A profile may name a specific level; otherwise the 11_0
