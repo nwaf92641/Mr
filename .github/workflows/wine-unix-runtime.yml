@@ -155,6 +155,39 @@ jobs:
                -o -name '*.dylib' \) \
             2>/dev/null | sort | tee "$RUNNER_TEMP/wine-unix-files.txt"
 
+          # The loader is killed at exec with SIGKILL -- "Killed: 9" -- inside the
+          # first second, while every other binary in this tree runs: the modules
+          # are fine, wineserver prints its version, /bin/echo works through the
+          # same harness. Its signature verifies (adhoc, linker-signed), and
+          # codesign reports one thing about it that it reports about nothing else:
+          # "Info.plist=not bound", from the bundle plist Wine embeds in __TEXT with
+          #
+          #   -Wl,...,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist
+          #
+          # So the loader is built twice and both are tested. The only difference
+          # between the two is that link flag, which makes this an experiment rather
+          # than a repair: if the one without the plist runs and the one with it
+          # dies, the cause is identified and the fix is known.
+          echo "--- keeping the configured loader, then building one without the embedded Info.plist"
+          cp -p loader/wine loader/wine-with-plist
+          codesign --verify loader/wine-with-plist >/dev/null 2>&1 && echo "the copy still verifies" || echo "the copy does not verify: its signature did not survive the copy"
+          make -C loader WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000" clean >/dev/null 2>&1 || true
+          if make -C loader WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000" -j"$ncpu" > loader-noplist.log 2>&1; then
+            echo "loader rebuilt without the embedded plist"
+          else
+            echo "the second loader build failed; see loader-noplist.log"
+            tail -20 loader-noplist.log || true
+          fi
+          for candidate in loader/wine loader/wine-with-plist; do
+            [ -e "$candidate" ] || continue
+            printf '%s: ' "$candidate"
+            if otool -s __TEXT __info_plist "$candidate" >/dev/null 2>&1 && otool -s __TEXT __info_plist "$candidate" | grep -q '[0-9a-f]'; then
+              echo "has an embedded __info_plist"
+            else
+              echo "no embedded __info_plist"
+            fi
+          done
+
           # Which name Wine gave the loader, read off the disk instead of assumed.
           # The earlier run checked loader/wine64 only, found nothing, and reported
           # success, which made "the loader is missing" look like "there was nothing
@@ -304,7 +337,7 @@ jobs:
           # The verdict reads the status files the diagnostic wrote, not the fact
           # that some step finished. Each configuration has its own directory, so a
           # status cannot be lost between a run and its log.
-          configs="control_echo control_wineserver plain dyld_trace with_dllpath with_prefix help resigned"
+          configs="control_echo control_wineserver plain with_plist dyld_trace with_dllpath with_prefix help resigned"
           status_of() {
             f="$RUNNER_TEMP/loader-diag/$1/status"
             if [ -f "$f" ] && [ "$(cat "$f")" = 0 ]; then echo yes; else echo no; fi

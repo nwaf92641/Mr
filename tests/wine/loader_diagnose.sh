@@ -217,6 +217,9 @@ echo "== 3. with WINEDLLPATH naming this build tree's modules =="
 echo "== 4. with a prefix that already exists =="
 ( mkdir -p "$out/prefix"; WINEDEBUG=-all WINEDLLPATH="$dllpath" WINEPREFIX="$out/prefix" run_case with_prefix 30 "./$loader" --version )
 
+echo "== 4b. the same build with the embedded Info.plist retained =="
+( unset WINEPREFIX; WINEDEBUG=-all run_case with_plist 30 ./loader/wine-with-plist --version )
+
 echo "== 5. --help, in case only the argument path is at fault =="
 ( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" run_case help 30 "./$loader" --help )
 
@@ -228,7 +231,7 @@ echo "== 6. the same binary after an ad-hoc re-sign =="
 echo
 echo "== statuses =="
 ran=""
-for case_dir in "$out"/control_echo "$out"/control_wineserver "$out"/plain "$out"/resigned "$out"/dyld_trace "$out"/with_dllpath "$out"/with_prefix "$out"/help; do
+for case_dir in "$out"/control_echo "$out"/control_wineserver "$out"/plain "$out"/with_plist "$out"/resigned "$out"/dyld_trace "$out"/with_dllpath "$out"/with_prefix "$out"/help; do
   [ -d "$case_dir" ] || continue
   label=$(basename "$case_dir")
   status=$(cat "$case_dir/status" 2>/dev/null || echo "?")
@@ -236,6 +239,15 @@ for case_dir in "$out"/control_echo "$out"/control_wineserver "$out"/plain "$out
   printf '%-13s status=%-5s stdout=%s bytes  %s\n' "$label" "$status" "${bytes:-0}" "$(cat "$case_dir/state" 2>/dev/null)"
   if [ "$status" = "0" ] && [ "${bytes:-0}" -gt 0 ]; then ran="$ran $label"; fi
 done
+
+# The A/B, stated as the conclusion it is or is not.
+with_plist_status=$(cat "$out/with_plist/status" 2>/dev/null || echo "?")
+plain_status=$(cat "$out/plain/status" 2>/dev/null || echo "?")
+if [ "$plain_status" = "0" ] && [ "$with_plist_status" != "0" ]; then
+  echo "attribution: the loader runs without the embedded __info_plist and dies with it, so the plist is the cause" | tee "$out/attribution.txt"
+elif [ "$plain_status" != "0" ] && [ "$with_plist_status" != "0" ]; then
+  echo "attribution: both die, so the embedded plist is not the cause and the next candidate is the segment layout" | tee "$out/attribution.txt"
+fi
 
 if [ -n "$ran" ]; then
   echo "verdict: the loader returned with output in:$ran" | tee "$out/verdict.txt"
