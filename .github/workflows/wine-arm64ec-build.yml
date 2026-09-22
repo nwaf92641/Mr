@@ -1,0 +1,309 @@
+# Wine on arm64 macOS, with the PE side built as ARM64EC.
+#
+# What this job is allowed to claim: that Wine's D3D11 path exists as PE modules
+# of the right machine type, with the right exports. What it cannot claim: that
+# anything ran, because building a DLL and loading it are different events. The
+# verification table says which is which.
+#
+# The architecture is deliberately two-headed, and that is the thing to watch:
+#
+#   unix side  Mach-O arm64, built by Apple's clang, because it is the loader and
+#              the .so modules that run on the machine.
+#   PE side    arm64ec, built by llvm-mingw. ARM64EC is PE machine type 0xA641,
+#              which is NOT arm64 (0xAA64) -- a DLL of the wrong machine type
+#              links fine and fails at load. So every DLL produced here has its
+#              machine type read back out of the file, and the aarch64 and
+#              arm64ec builds of the same module are told apart by that field
+#              rather than by which directory they landed in.
+
+name: Wine ARM64EC on Apple Silicon
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-wine:
+    name: Build Wine ARM64EC on arm64 macOS
+    runs-on: macos-15
+    # A full Wine build is far longer than this; the timeout is generous because
+    # the build is the work.
+    timeout-minutes: 240
+    env:
+      WINE_SRC: ${{ runner.temp }}/wine
+      MINGW_ROOT: ${{ runner.temp }}/llvm-mingw
+      MINGW_VERSION: '20260908'
+    steps:
+      - uses: actions/checkout@v4
+
+      # Recorded, not assumed. A build report that does not say which compiler
+      # and which SDK produced it is not reproducible.
+      - name: Toolchain, recorded
+        run: |
+          set -euo pipefail
+          echo "runner: $(uname -s) $(uname -m) $(sw_vers -productVersion)"
+          echo "clang: $(clang --version | head -1)"
+          echo "sdk: $(xcrun --sdk macosx --show-sdk-path)"
+          echo "xcode: $(xcodebuild -version 2>/dev/null | head -1)"
+          sw_vers
+          brew install bison flex pkg-config >/dev/null 2>&1 || true
+          echo "bison: $(bison --version | head -1)"
+          test -d "$(xcrun --sdk macosx --show-sdk-path)" || {
+            echo "::error::no macOS SDK, and Wine's configure needs one"
+            exit 1
+          }
+
+      # llvm-mingw is the only toolchain that ships an arm64ec target for macOS
+      # hosts, and Wine's configure probes for exactly these three names.
+      #
+      # The digest is printed rather than asserted: it is not in wine.lock
+      # because nobody has seen it yet, and writing a checksum nobody computed
+      # would be an invented fact in a file of checked ones.
+      - name: llvm-mingw, with the arm64ec target
+        run: |
+          set -euo pipefail
+          asset="llvm-mingw-$MINGW_VERSION-ucrt-macos-universal.tar.xz"
+          url="https://github.com/mstorsjo/llvm-mingw/releases/download/$MINGW_VERSION/$asset"
+          curl -fSL -o "$RUNNER_TEMP/$asset" "$url"
+          echo "asset: $asset"
+          shasum -a 256 "$RUNNER_TEMP/$asset" | tee "$RUNNER_TEMP/mingw-sha256.txt"
+          mkdir -p "$MINGW_ROOT"
+          tar -xJf "$RUNNER_TEMP/$asset" -C "$MINGW_ROOT" --strip-components=1
+          for tool in arm64ec-w64-mingw32-clang aarch64-w64-mingw32-clang \
+                      x86_64-w64-mingw32-clang llvm-readobj; do
+            if [ ! -x "$MINGW_ROOT/bin/$tool" ]; then
+              echo "::error::llvm-mingw $MINGW_VERSION has no $tool, so this build cannot cross-compile the PE side"
+              exit 1
+            fi
+          done
+          "$MINGW_ROOT/bin/arm64ec-w64-mingw32-clang" --version | head -2
+          {
+            echo "llvm-mingw $MINGW_VERSION"
+            "$MINGW_ROOT/bin/arm64ec-w64-mingw32-clang" --version | head -1
+            shasum -a 256 "$RUNNER_TEMP/$asset"
+          } > "$RUNNER_TEMP/mingw-evidence.txt"
+
+      - name: Fetch Wine at the pinned commit
+        run: |
+          set -euo pipefail
+          # The lock file is the source of truth, so the commit is read out of it
+          # and the checkout is verified against what was asked for.
+          commit=$(sed -n 's/^commit  *= *//p' third_party/wine.lock | head -1)
+          tag=$(sed -n 's/^tag  *= *//p' third_party/wine.lock | head -1)
+          echo "lock says: $tag $commit"
+          test -n "$commit" || { echo "::error::third_party/wine.lock has no commit"; exit 1; }
+          git init -q "$WINE_SRC"
+          git -C "$WINE_SRC" remote add origin https://github.com/wine-mirror/wine.git
+          git -C "$WINE_SRC" fetch -q --depth 1 origin "$commit"
+          git -C "$WINE_SRC" checkout -q FETCH_HEAD
+          actual=$(git -C "$WINE_SRC" rev-parse HEAD)
+          echo "checked out: $actual"
+          test "$actual" = "$commit" || {
+            echo "::error::checked out $actual, the lock file pins $commit"
+            exit 1
+          }
+          test -f "$WINE_SRC/configure" || {
+            echo "::error::Wine's tree has no configure, which would mean autoconf is needed; this build does not run autoconf"
+            exit 1
+          }
+          {
+            echo "wine tag: $tag"
+            echo "wine commit: $actual"
+            echo "wine commit date: $(git -C "$WINE_SRC" show -s --format=%cI HEAD)"
+            echo "wine commit subject: $(git -C "$WINE_SRC" show -s --format=%s HEAD)"
+          } | tee "$RUNNER_TEMP/wine-provenance.txt"
+
+      # The loader and the .so modules are built by Apple's clang; only the PE
+      # side is cross-compiled. Both are configured in one run because Wine
+      # decides how to build each module from the arch it belongs to.
+      - name: configure
+        run: |
+          set -euo pipefail
+          export PATH="$MINGW_ROOT/bin:$PATH"
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          mkdir -p "$WINE_SRC/build-arm64ec" && cd "$WINE_SRC/build-arm64ec"
+          ../configure \
+            --enable-win64 \
+            --enable-archs=aarch64,arm64ec \
+            --with-mingw=llvm-mingw \
+            --disable-tests \
+            > "$RUNNER_TEMP/wine-configure.log" 2>&1 || {
+              echo "::error title=Wine configure failed::see the log in the artifacts"
+              tail -60 "$RUNNER_TEMP/wine-configure.log"
+              exit 1
+            }
+          tail -40 "$RUNNER_TEMP/wine-configure.log"
+
+      # configure's own report, read back. Whether it found an arm64ec compiler
+      # is the difference between "the flag was accepted" and "the flag will do
+      # something", and the two are easy to confuse.
+      - name: What configure decided about the architectures
+        run: |
+          set -euo pipefail
+          cd "$WINE_SRC/build-arm64ec"
+          for arch in arm64ec aarch64 x86_64; do
+            if grep -q "${arch}-windows" config.log 2>/dev/null; then
+              echo "$arch: mentioned in config.log"
+            else
+              echo "$arch: not mentioned in config.log"
+            fi
+          done
+          grep -iE 'arm64ec[_-](CC|w64)|arm64ec.*clang|checking for.*arm64ec' config.log | head -10 || true
+          {
+            echo "## configure, verbatim"
+            grep -iE 'checking for (arm64ec|aarch64|x86_64)[^ ]*' config.log | head -20 || true
+            echo "## Makefile architecture vars"
+            grep -E '^(ARM64EC|AARCH64|X86_64)[A-Z_]* *=' Makefile 2>/dev/null | head -20 || true
+          } | tee "$RUNNER_TEMP/configure-architectures.txt"
+
+      # Walked up from the smallest module, so that a toolchain failure is told
+      # apart from a module failure. If d3dcompiler_47 cannot cross-compile,
+      # nothing above it will either, and the log says so at the first step
+      # rather than after an hour of d3d11.
+      - name: Build d3dcompiler_47, the smallest PE module
+        run: |
+          set -euo pipefail
+          export PATH="$MINGW_ROOT/bin:$PATH"
+          cd "$WINE_SRC/build-arm64ec"
+          if ! make -j"$(sysctl -n hw.ncpu)" dlls/d3dcompiler_47 \
+                 > "$RUNNER_TEMP/build-d3dcompiler_47.log" 2>&1; then
+            # Wine's top-level make accepts a subdirectory as a target in recent
+            # versions; configure also generates a Makefile in every directory. If
+            # the first form is refused, the second is tried and the log says
+            # which one produced the result.
+            echo "make dlls/d3dcompiler_47 failed, trying the directory's own Makefile"
+            if ! make -C dlls/d3dcompiler_47 -j"$(sysctl -n hw.ncpu)" \
+                   >> "$RUNNER_TEMP/build-d3dcompiler_47.log" 2>&1; then
+              echo "::error title=d3dcompiler_47 failed to build::see the log in the artifacts"
+              grep -iE 'error|no such file|not found|undefined' "$RUNNER_TEMP/build-d3dcompiler_47.log" | head -30 || true
+              exit 1
+            fi
+          fi
+          tail -5 "$RUNNER_TEMP/build-d3dcompiler_47.log"
+          find dlls/d3dcompiler_47 -name '*.dll' -o -name '*.so' | head
+
+      - name: Build dxgi, then d3d11
+        run: |
+          set -euo pipefail
+          export PATH="$MINGW_ROOT/bin:$PATH"
+          cd "$WINE_SRC/build-arm64ec"
+          for module in dxgi d3d11; do
+            if ! make -j"$(sysctl -n hw.ncpu)" "dlls/$module" \
+                   > "$RUNNER_TEMP/build-$module.log" 2>&1; then
+              echo "make dlls/$module failed, trying the directory's own Makefile"
+              if ! make -C "dlls/$module" -j"$(sysctl -n hw.ncpu)" \
+                     >> "$RUNNER_TEMP/build-$module.log" 2>&1; then
+                echo "::error title=$module failed to build::see the log in the artifacts"
+                grep -iE 'error|undefined|not found' "$RUNNER_TEMP/build-$module.log" | head -30 || true
+                exit 1
+              fi
+            fi
+            tail -3 "$RUNNER_TEMP/build-$module.log"
+          done
+
+      # The check the whole job turns on. A DLL is not ARM64EC because the build
+      # was asked for ARM64EC; it is ARM64EC because its PE header says 0xA641.
+      # The aarch64 build of the same module is in the same tree, which is why
+      # the arch is taken from the header rather than from the path.
+      - name: Every module's PE machine type, read from the file
+        run: |
+          set -euo pipefail
+          cd "$WINE_SRC/build-arm64ec"
+          {
+            echo "module | file | machine"
+            echo "--- | --- | ---"
+          } > "$RUNNER_TEMP/pe-machines.txt"
+          missing=0
+          for module in d3d11 dxgi d3dcompiler_47; do
+            found=0
+            while IFS= read -r dll; do
+              found=1
+              machine=$("$MINGW_ROOT/bin/llvm-readobj" --file-headers "$dll" \
+                        | grep -i 'Machine:' | head -1 | sed 's/^ *//')
+              echo "$(basename "$dll") | $dll | $machine" | tee -a "$RUNNER_TEMP/pe-machines.txt"
+            done < <(find "dlls/$module" -name '*.dll' | sort)
+            if [ "$found" -eq 0 ]; then
+              echo "::error::$module produced no .dll at all"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0 || exit 1
+
+          # AMR64EC where ARM64EC was required. If the only d3d11.dll present is
+          # aarch64, this fails and says so, which is the point.
+          arm64ec_dlls=$(grep -c 'ARM64EC' "$RUNNER_TEMP/pe-machines.txt" || true)
+          echo "modules with machine type ARM64EC: $arm64ec_dlls"
+          test "$arm64ec_dlls" -gt 0 || {
+            echo "::error::no module was built as ARM64EC (0xA641). A cross build that produced aarch64 (0xAA64) instead would link and fail at load."
+            exit 1
+          }
+
+      # Symbols, not directories. d3d11 must export the entry point the runtime
+      # calls, and d3dcompiler_47 must export the one that turns HLSL into DXBC.
+      - name: The entry points, read out of the exports
+        run: |
+          set -euo pipefail
+          cd "$WINE_SRC/build-arm64ec"
+          status=0
+          for pair in "d3d11:D3D11CreateDevice" "dxgi:CreateDXGIFactory" "d3dcompiler_47:D3DCompile"; do
+            module="${pair%%:*}"; symbol="${pair##*:}"
+            dll=$(find "dlls/$module" -name '*.dll' | while read -r f; do
+                    if "$MINGW_ROOT/bin/llvm-readobj" --file-headers "$f" | grep -qi ARM64EC; then echo "$f"; fi
+                  done | head -1)
+            if [ -z "$dll" ]; then
+              echo "::error::$module has no ARM64EC build, so $symbol cannot be checked in one"
+              status=1
+              continue
+            fi
+            if "$MINGW_ROOT/bin/llvm-readobj" --coff-exports "$dll" | grep -q "$symbol"; then
+              echo "$module ($dll) exports $symbol"
+            else
+              echo "::error::$module does not export $symbol"
+              status=1
+            fi
+          done
+          exit "$status"
+
+      # Written where it can be read and uploaded, rather than reconstructed from
+      # a log afterwards. Build and runtime are separate rows, because they are
+      # separate facts.
+      - name: Verification table
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "# Mr verification, Wine stage"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Wine source pinned | $( [ -f third_party/wine.lock ] && echo 'PASS' || echo 'FAIL' ) |"
+            echo "| Wine configure | $( [ -f "$RUNNER_TEMP/wine-configure.log" ] && echo 'PASS' || echo 'NOT REACHED' ) |"
+            echo "| ARM64EC PE module built | $( [ -f "$RUNNER_TEMP/pe-machines.txt" ] && grep -q ARM64EC "$RUNNER_TEMP/pe-machines.txt" && echo 'VERIFIED' || echo 'NOT VERIFIED' ) |"
+            echo "| d3d11 / dxgi / d3dcompiler_47 | see pe-machines.txt |"
+            echo "| Wine loaded a DLL | NOT VERIFIED, needs a built Wine runtime |"
+            echo "| D3D11CreateDevice runtime | NOT VERIFIED, needs a built Wine runtime |"
+            echo "| DXBC path | NOT VERIFIED, needs Wine running and DXMT linked |"
+            echo "| GPU rendering | REQUIRES REAL APPLE GPU VALIDATION |"
+            echo
+            echo "A built DLL is not a loaded DLL. Nothing in this table was executed."
+          } > "$RUNNER_TEMP/verification.txt"
+          cat "$RUNNER_TEMP/verification.txt"
+
+      - name: Upload Wine build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-arm64ec-evidence
+          path: |
+            ${{ runner.temp }}/wine-provenance.txt
+            ${{ runner.temp }}/mingw-evidence.txt
+            ${{ runner.temp }}/mingw-sha256.txt
+            ${{ runner.temp }}/wine-configure.log
+            ${{ runner.temp }}/configure-architectures.txt
+            ${{ runner.temp }}/build-*.log
+            ${{ runner.temp }}/pe-machines.txt
+            ${{ runner.temp }}/verification.txt
+            ${{ runner.temp }}/wine/build-arm64ec/dlls/d3d11/**/*.dll
+            ${{ runner.temp }}/wine/build-arm64ec/dlls/dxgi/**/*.dll
+            ${{ runner.temp }}/wine/build-arm64ec/dlls/d3dcompiler_47/**/*.dll
+          if-no-files-found: warn
