@@ -1,0 +1,302 @@
+# The half of Wine the PE workflow does not build: the Unix side.
+#
+# The PE workflow builds d3d11.dll, dxgi.dll and d3dcompiler_47.dll and stops
+# there, because that is what it was written to establish. A DLL that was built is
+# not a DLL that was loaded, and loading needs the loader, ntdll's unix half,
+# win32u.so and wineserver -- host-native arm64 code, since the PE side being
+# aarch64/arm64ec does not make the Unix side anything other than the host.
+#
+# So this workflow builds those and then tries to use them. What it can reach is
+# not assumed in advance: each step records what exists, and the last one says
+# plainly whether a PE module was loaded or not.
+#
+# The setup steps are the same as the PE workflow's, and they are deliberately not
+# shared yet. The PE pipeline is verified and this one is not, and refactoring a
+# verified pipeline in the same change as debugging an unverified one is how a
+# working thing stops working for reasons nobody can see. That moves to a shared
+# setup the moment this workflow is green.
+
+name: Wine Unix runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - wine-arm64ec-dxmt
+      - wine-unix-runtime-metal4
+  pull_request:
+    paths:
+      - 'third_party/wine.lock'
+      - 'tests/wine/**'
+      - '.github/workflows/wine-unix-runtime.yml'
+
+permissions:
+  contents: read
+
+env:
+  MINGW_VERSION: '20260908'
+
+jobs:
+  wine-unix-runtime:
+    name: Wine Unix runtime
+    runs-on: macos-15
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Paths
+        run: |
+          {
+            echo "WINE_SRC=$GITHUB_WORKSPACE/third_party/wine/src"
+            echo "WINE_BUILD=$GITHUB_WORKSPACE/third_party/wine/src/build-arm64ec"
+            echo "RUNNER_TEMP=$RUNNER_TEMP"
+            echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          } >> "$GITHUB_ENV"
+
+      - name: Toolchain, recorded
+        run: |
+          set -euo pipefail
+          sw_vers
+          brew install bison flex pkg-config
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          export PATH="$(brew --prefix bison)/bin:$PATH"
+          bison --version | head -1
+
+      - name: llvm-mingw, with the aarch64 and arm64ec targets
+        run: |
+          set -euo pipefail
+          asset="llvm-mingw-${MINGW_VERSION}-ucrt-macos-universal.tar.xz"
+          url="https://github.com/mstorsjo/llvm-mingw/releases/download/${MINGW_VERSION}/${asset}"
+          curl -fsSL "$url" -o "$RUNNER_TEMP/$asset"
+          tar -xf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP"
+          root="$RUNNER_TEMP/llvm-mingw-${MINGW_VERSION}-ucrt-macos-universal"
+          echo "MINGW_ROOT=$root" >> "$GITHUB_ENV"
+          for tool in aarch64-w64-mingw32-clang arm64ec-w64-mingw32-clang; do
+            test -x "$root/bin/$tool" || {
+              echo "::error::llvm-mingw $MINGW_VERSION has no $tool"
+              exit 1
+            }
+            echo "$tool: yes"
+          done
+          "$root/bin/aarch64-w64-mingw32-clang" --version | head -1
+
+      - name: Fetch Wine at the pinned commit
+        run: |
+          set -euo pipefail
+          commit=$(grep -E '^commit ' third_party/wine.lock | head -1 | cut -d= -f2 | tr -d ' ')
+          test -n "$commit" || { echo "::error::no commit in third_party/wine.lock"; exit 1; }
+          mkdir -p third_party/wine/src
+          cd third_party/wine/src
+          git init -q
+          git remote add origin https://github.com/wine-mirror/wine
+          git fetch -q --depth 1 origin "$commit"
+          git checkout -q FETCH_HEAD
+          echo "checked out $(git rev-parse HEAD)"
+          echo "commit=$commit" >> "$GITHUB_ENV"
+
+      - name: configure
+        run: |
+          set -euo pipefail
+          export PATH="$MINGW_ROOT/bin:$PATH"
+          mkdir -p "$WINE_BUILD"
+          cd "$WINE_BUILD"
+          # aarch64 and arm64ec for the PE side; x86_64 as the extra arch arm64ec
+          # requires. The Unix side is host-native arm64 either way.
+          "$WINE_SRC/configure" \
+            --enable-archs=aarch64,arm64ec,x86_64 \
+            --without-alsa --without-capi --without-coreaudio --without-cups \
+            --without-dbus --without-fontconfig --without-freetype \
+            --without-gnutls --without-gssapi --without-hal \
+            --without-krb5 --without-netapi --without-opencl \
+            --without-openssl --without-oss --without-pcap --without-pulse \
+            --without-sane --without-sdl --without-udev --without-usb \
+            --without-v4l2 --without-vulkan --without-wayland \
+            --without-x --without-xcursor --without-xfixes --without-xi2 \
+            --without-xinerama --without-xinput --without-xinput2 \
+            --without-xrandr --without-xrender --without-xshape \
+            --without-xshm --without-xcomposite --without-xkb \
+            > "$RUNNER_TEMP/wine-unix-configure.log" 2>&1 || {
+            echo "::error title=configure failed::see wine-unix-configure.log"
+            tail -30 "$RUNNER_TEMP/wine-unix-configure.log"
+            exit 1
+          }
+          tail -5 "$RUNNER_TEMP/wine-unix-configure.log"
+
+      # The Unix side, target by target, smallest first and for the same reason as
+      # on the PE side: a failure at the loader and a failure at wineserver are
+      # different problems and the log should say which one happened first.
+      - name: Build the Unix side
+        run: |
+          set -euo pipefail
+          export PATH="$MINGW_ROOT/bin:$PATH"
+          cd "$WINE_BUILD"
+          ncpu=$(sysctl -n hw.ncpu)
+          log="$RUNNER_TEMP/wine-unix-build.log"
+          : > "$log"
+          : > "$RUNNER_TEMP/wine-unix-plan.txt"
+
+          for target in dlls/ntdll dlls/win32u loader server; do
+            if [ ! -f "$target/Makefile" ]; then
+              echo "$target: no generated Makefile, skipped" | tee -a "$RUNNER_TEMP/wine-unix-plan.txt"
+              continue
+            fi
+            echo "$target: make -C $target" | tee -a "$RUNNER_TEMP/wine-unix-plan.txt"
+            make -C "$target" -j"$ncpu" >> "$log" 2>&1 || {
+              echo "::error title=the Unix side failed at $target::see wine-unix-build.log"
+              tail -30 "$log"
+              exit 1
+            }
+          done
+
+          echo "--- what the Unix side produced ---"
+          find loader server dlls/ntdll dlls/win32u \
+            \( -name '*.so' -o -name 'wine64' -o -name 'wineserver' -o -name '*.dylib' \) \
+            2>/dev/null | sort | tee "$RUNNER_TEMP/wine-unix-files.txt"
+
+      - name: What the loader is, as a binary
+        run: |
+          set -euo pipefail
+          cd "$WINE_BUILD"
+          out="$RUNNER_TEMP/wine-loader-binary.txt"
+          : > "$out"
+          for f in loader/wine64 loader/wine server/wineserver dlls/ntdll/ntdll.so \
+                   dlls/win32u/win32u.so; do
+            {
+              echo "### $f"
+              if [ -e "$f" ]; then
+                file "$f"
+                echo "-- dependencies:"
+                otool -L "$f" 2>/dev/null || echo "(otool could not read it)"
+                echo "-- architecture:"
+                lipo -archs "$f" 2>/dev/null || true
+              else
+                echo "not built"
+              fi
+              echo ""
+            } >> "$out"
+          done
+          cat "$out"
+
+      # The first thing a Unix runtime has to do is start. This is the lowest
+      # honest bar and it is a different claim from "Wine can run a title".
+      - name: Does the loader start
+        run: |
+          set -euo pipefail
+          cd "$WINE_BUILD"
+          out="$RUNNER_TEMP/wine-loader-run.txt"
+          : > "$out"
+          export WINEPREFIX="$RUNNER_TEMP/prefix"
+          mkdir -p "$WINEPREFIX"
+
+          # macOS has no timeout(1), so the limit is a background killer. This is
+          # the one thing that has to be portable here: a Wine loader that hangs
+          # would otherwise sit until the job's own timeout says nothing useful.
+          run_limited() {
+            local seconds="$1"; shift
+            local outfile="$1"; shift
+            "$@" >> "$outfile" 2>&1 &
+            local pid=$!
+            ( sleep "$seconds"; kill -9 "$pid" 2>/dev/null ) &
+            local killer=$!
+            wait "$pid"
+            local rc=$?
+            kill "$killer" 2>/dev/null || true
+            wait "$killer" 2>/dev/null || true
+            return "$rc"
+          }
+
+          if [ ! -x loader/wine64 ]; then
+            echo "loader/wine64 was not built, so nothing could be started" | tee -a "$out"
+            exit 0
+          fi
+
+          set +e
+          run_limited 300 "$out" ./loader/wine64 --version
+          rc=$?
+          set -e
+          echo "wine64 --version exit status: $rc" | tee -a "$out"
+          tail -20 "$out"
+
+      # The load test: a native arm64 Windows executable that loads d3d11 and
+      # resolves the entry points. It is the same question the PE workflow asked by
+      # reading exports, asked the other way -- by asking Wine to load the module
+      # and hand back the address.
+      - name: Build and run the D3D11 load test
+        run: |
+          set -euo pipefail
+          export PATH="$MINGW_ROOT/bin:$PATH"
+          cd "$WINE_BUILD"
+          out="$RUNNER_TEMP/wine-load-test.txt"
+          : > "$out"
+          export WINEPREFIX="$RUNNER_TEMP/prefix"
+
+          aarch64-w64-mingw32-clang "$GITHUB_WORKSPACE/tests/wine/load_d3d11.c" \
+            -o "$RUNNER_TEMP/load_d3d11.exe" >> "$out" 2>&1 || {
+            echo "::error title=the load test did not compile::see wine-load-test.txt"
+            tail -20 "$out"
+            exit 1
+          }
+          file "$RUNNER_TEMP/load_d3d11.exe" | tee -a "$out"
+
+          if [ ! -x loader/wine64 ]; then
+            echo "no loader was built, so the test could not be run" | tee -a "$out"
+            exit 0
+          fi
+
+          set +e
+          run_limited 600 "$out" ./loader/wine64 "$RUNNER_TEMP/load_d3d11.exe"
+          rc=$?
+          set -e
+          echo "load test exit status: $rc" | tee -a "$out"
+          tail -30 "$out"
+
+      - name: Verification table
+        if: always()
+        run: |
+          set -euo pipefail
+          have() { [ -e "$1" ] && echo "yes" || echo "no"; }
+          cd "$WINE_BUILD"
+
+          loader=$(have loader/wine64)
+          ntdll=$(have dlls/ntdll/ntdll.so)
+          win32u=$(have dlls/win32u/win32u.so)
+          server=$(have server/wineserver)
+          version_ok=$(grep -q 'wine-' "$RUNNER_TEMP/wine-loader-run.txt" \
+            2>/dev/null && echo "yes" || echo "no")
+          load_ok=$(grep -q 'LOAD TEST OK' "$RUNNER_TEMP/wine-load-test.txt" \
+            2>/dev/null && echo "yes" || echo "no")
+
+          {
+            echo "# Mr verification, Wine Unix runtime"
+            echo ""
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| loader/wine64 built | $loader |"
+            echo "| ntdll.so built | $ntdll |"
+            echo "| win32u.so built | $win32u |"
+            echo "| wineserver built | $server |"
+            echo "| loader reports its version | $version_ok |"
+            echo "| Wine loaded d3d11 and resolved D3D11CreateDevice | $load_ok |"
+            echo ""
+            echo "A loader that starts is not Wine running a title, and this table does"
+            echo "not pretend otherwise: the row that matters for the graphics path is"
+            echo "the last one, and it is 'no' until Wine reaches a prefix."
+          } | tee "$RUNNER_TEMP/wine-unix-verification.txt"
+          cat "$RUNNER_TEMP/wine-unix-verification.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Wine Unix evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-unix-evidence
+          path: |
+            ${{ runner.temp }}/wine-unix-configure.log
+            ${{ runner.temp }}/wine-unix-build.log
+            ${{ runner.temp }}/wine-unix-plan.txt
+            ${{ runner.temp }}/wine-unix-files.txt
+            ${{ runner.temp }}/wine-loader-binary.txt
+            ${{ runner.temp }}/wine-loader-run.txt
+            ${{ runner.temp }}/wine-load-test.txt
+            ${{ runner.temp }}/wine-unix-verification.txt
+          if-no-files-found: warn

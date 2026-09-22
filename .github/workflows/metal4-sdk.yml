@@ -1,0 +1,194 @@
+# What Metal 4 on this machine actually is, read out of the SDK rather than
+# remembered.
+#
+# The first job of this workflow is not to build anything. It is to write down
+# which Metal 4 names the SDK on this machine declares, which OS each of them
+# requires according to its own API_AVAILABLE line, and which of them this device
+# answers for at runtime. Every API Mr names in the Metal 4 path has to appear in
+# that output first. Nothing here is written from recollection of the API, because
+# a wrong name remembered confidently is exactly the kind of error that costs an
+# afternoon three layers below the mistake.
+#
+# The runner has a paravirtual GPU, so the runtime half of this ends in REQUIRES
+# REAL APPLE GPU VALIDATION. That is the honest answer and it is not a pass: the
+# job records what it could and could not establish.
+
+name: Metal 4 SDK and API surface
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - apple-graphics-capability
+      - wine-arm64ec-dxmt
+      - wine-unix-runtime-metal4
+  pull_request:
+    paths:
+      - 'tests/metal/**'
+      - '.github/workflows/metal4-sdk.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  metal4-sdk:
+    name: Metal 4 API surface
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Which Xcode and which SDK
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          echo "sdk path: $(xcrun --sdk macosx --show-sdk-path)"
+          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          grep -E 'MAC_OS_X_VERSION|__MAC_26' \
+            "$SDK/usr/include/AvailabilityVersions.h" 2>/dev/null | head -5 || true
+          {
+            echo "## xcode"
+            xcodebuild -version
+            echo "## sdk"
+            echo "$SDK"
+            echo "## the SDK's own view of macOS 26"
+            grep -E 'define __MAC_26' "$SDK/usr/include/AvailabilityVersions.h" \
+              2>/dev/null || echo "no __MAC_26 definition in this SDK"
+          } | tee "$RUNNER_TEMP/xcode-and-sdk.txt"
+
+      # The ground truth for every Metal 4 name this project is allowed to use.
+      # Grepped, not recalled: headers, the types they declare, and the
+      # availability line that guards each one.
+      - name: The SDK's Metal 4 declarations, verbatim
+        run: |
+          set -euo pipefail
+          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          METAL="$SDK/System/Library/Frameworks/Metal.framework/Headers"
+          out="$RUNNER_TEMP/metal4-sdk-headers.txt"
+          : > "$out"
+
+          {
+            echo "## MTL4 headers present in $METAL"
+          } >> "$out"
+          # shellcheck disable=SC2010
+          ls "$METAL" | grep -iE '^MTL4' >> "$out" || echo "(none)" >> "$out"
+
+          found=0
+          for h in "$METAL"/MTL4*.h; do
+            [ -e "$h" ] || continue
+            found=$((found + 1))
+            {
+              echo ""
+              echo "### $(basename "$h")"
+              echo "## availability, verbatim:"
+              grep -m3 -E 'API_AVAILABLE|API_UNAVAILABLE|MTL_EXPORT' "$h" || true
+              echo "## types declared:"
+              grep -oE '@(interface|protocol|class) +[A-Za-z0-9_]+' "$h" | sort -u
+              echo "## selectors mentioning command, argument or residency:"
+              grep -oE '^[-+] *\([^)]*\) *[A-Za-z0-9_]*(Command|Argument|Residency)[A-Za-z0-9_]*' \
+                "$h" | sed 's/.*[) ]//' | sort -u | head -20 || true
+            } >> "$out"
+          done
+
+          if [ "$found" -eq 0 ]; then
+            {
+              echo ""
+              echo "## This SDK declares no MTL4 headers."
+              echo "## Therefore no Metal 4 name is available to Mr at compile time on"
+              echo "## this machine, and the Metal 4 path cannot be written or compiled"
+              echo "## here yet. Runtime lookup (tests/metal/metal4_sdk_probe.m) still"
+              echo "## reports what the OS answers for."
+            } >> "$out"
+          fi
+
+          echo "MTL4 headers found: $found"
+          head -80 "$out"
+
+      - name: Build and run the Metal 4 probe
+        run: |
+          set -euo pipefail
+          # Compiled here rather than through the project's CMake on purpose: this
+          # probe has to be buildable on a machine where the project is not, so
+          # that "the SDK does not have Metal 4" and "Mr does not build" stay
+          # different answers.
+          clang -fobjc-arc -fmodules -Wno-deprecated-declarations \
+            -framework Foundation -framework Metal \
+            tests/metal/metal4_sdk_probe.m -o "$RUNNER_TEMP/metal4_probe"
+
+          set +e
+          "$RUNNER_TEMP/metal4_probe" | tee "$RUNNER_TEMP/metal4-probe.txt"
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "probe exit status: $rc"
+
+          # 0 is a real Apple GPU answering for Metal 4. 77 is this machine being
+          # unable to verify it, which is what the runner is. Anything else means
+          # the probe did not run, which is a failure of this job.
+          case "$rc" in
+            0) echo "| real Apple GPU | VERIFIED |" >> "$GITHUB_STEP_SUMMARY" ;;
+            77)
+              echo "| real Apple GPU | REQUIRES HARDWARE |" >> "$GITHUB_STEP_SUMMARY"
+              echo "this machine cannot verify Metal 4: see metal4-probe.txt"
+              ;;
+            *)
+              echo "::error title=the Metal 4 probe did not run::exit status $rc"
+              exit 1
+              ;;
+          esac
+
+          # The runtime half has to be readable on its own, so the device answers
+          # are named here rather than left inside a probe's output file.
+          for key in real_apple_gpu metal4_available; do
+            value=$(grep -m1 "^$key=" "$RUNNER_TEMP/metal4-probe.txt" | cut -d= -f2)
+            echo "$key=$value"
+          done
+
+      - name: What this establishes, and what it does not
+        run: |
+          set -euo pipefail
+          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          METAL="$SDK/System/Library/Frameworks/Metal.framework/Headers"
+          mtl4_headers=$(ls "$METAL" 2>/dev/null | grep -ciE '^MTL4' || true)
+          runtime_metal4=$(grep -m1 '^metal4_available=' "$RUNNER_TEMP/metal4-probe.txt" \
+            | cut -d= -f2 || true)
+          real_gpu=$(grep -m1 '^real_apple_gpu=' "$RUNNER_TEMP/metal4-probe.txt" \
+            | cut -d= -f2 || true)
+
+          {
+            echo "# Mr verification, Metal 4 API surface"
+            echo ""
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| SDK declares MTL4 headers | $mtl4_headers |"
+            echo "| Metal 4 answered at runtime | $runtime_metal4 |"
+            echo "| real Apple GPU | $real_gpu |"
+            echo ""
+            if [ "$mtl4_headers" -eq 0 ]; then
+              echo "The SDK on this machine has no MTL4 headers, so no Metal 4 name can"
+              echo "be compiled in here. The runtime answers are still meaningful: they"
+              echo "say what this OS and this device reply to, which is the half that"
+              echo "hardware decides."
+            else
+              echo "The MTL4 headers above are the API surface Mr's Metal 4 path may use,"
+              echo "with each one's API_AVAILABLE line reporting the OS it needs."
+            fi
+            echo ""
+            echo "Nothing in this table executed a Metal 4 command. Compiling a probe that"
+            echo "names an API is not running it, and a paravirtual device answering no is"
+            echo "not an Apple GPU answering yes."
+          } | tee "$RUNNER_TEMP/metal4-verification.txt"
+          cat "$RUNNER_TEMP/metal4-verification.txt" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Metal 4 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metal4-sdk-evidence
+          path: |
+            ${{ runner.temp }}/xcode-and-sdk.txt
+            ${{ runner.temp }}/metal4-sdk-headers.txt
+            ${{ runner.temp }}/metal4-probe.txt
+            ${{ runner.temp }}/metal4-verification.txt
+          if-no-files-found: error
