@@ -72,12 +72,31 @@ run_case() {
   env_snapshot > "$dir/env.txt"
 
   echo "--- $label: $*"
+  started=$(date +%s)
   "$@" > "$dir/stdout" 2> "$dir/stderr" &
   pid=$!
 
+  # How long it lived is part of the answer: a process killed at exec time and one
+  # killed after thirty seconds are different problems, and the previous version
+  # recorded only the final number, which said neither.
   waited=0
-  while [ "$waited" -lt "$seconds" ] && kill -0 "$pid" 2>/dev/null; do
-    sleep 1
+  died_after=""
+  while [ "$waited" -lt "$((seconds * 5))" ]; do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      died_after=$(( $(date +%s) - started ))
+      break
+    fi
+    # While it is alive, the whole process group matters: Wine's loader re-executes
+    # itself on this platform, and a child that inherited the output file is a
+    # different process from the one being waited on.
+    if [ "$waited" = 4 ] || [ "$waited" = 10 ]; then
+      pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+      if [ -n "$pgid" ]; then
+        ps -o pid,ppid,pgid,stat,%cpu,time,command -g "$pgid" >> "$dir/ps.txt" 2>&1 || true
+        echo "--- process group $pgid listed above" >> "$dir/ps.txt"
+      fi
+    fi
+    sleep 0.2
     waited=$((waited + 1))
   done
 
@@ -98,7 +117,15 @@ run_case() {
   else
     wait "$pid"
     rc=$?
-    echo "exited with status $rc" > "$dir/state"
+    # 128 and above means a signal, and which signal is the diagnosis. 137 is
+    # SIGKILL: something with the authority to send it decided this process should
+    # die, and it was not this script.
+    if [ "$rc" -ge 128 ]; then
+      signal=$(kill -l "$((rc - 128))" 2>/dev/null || echo "signal $((rc - 128))")
+      echo "exited after ${died_after}s with status $rc, which is SIG$signal" > "$dir/state"
+    else
+      echo "exited after ${died_after}s with status $rc (no signal)" > "$dir/state"
+    fi
     echo "$rc" > "$dir/status"
   fi
 
@@ -126,6 +153,12 @@ run_case() {
 }
 
 echo
+echo "== 0a. control: a system binary through the same harness =="
+( unset WINEDLLPATH; unset WINEPREFIX; run_case control_echo 10 /bin/echo wine-control )
+
+echo "== 0b. control: another Wine binary through the same harness =="
+( unset WINEDLLPATH; unset WINEPREFIX; run_case control_wineserver 10 ./server/wineserver --version )
+
 echo "== 1. plain, the way the earlier step ran it =="
 ( unset WINEDLLPATH; unset WINEPREFIX; unset DYLD_PRINT_INITIALIZERS; unset DYLD_PRINT_LIBRARIES; run_case plain 30 "./$loader" --version )
 
@@ -144,7 +177,7 @@ echo "== 5. --help, in case only the argument path is at fault =="
 echo
 echo "== statuses =="
 ran=""
-for case_dir in "$out"/plain "$out"/dyld_trace "$out"/with_dllpath "$out"/with_prefix "$out"/help; do
+for case_dir in "$out"/control_echo "$out"/control_wineserver "$out"/plain "$out"/dyld_trace "$out"/with_dllpath "$out"/with_prefix "$out"/help; do
   [ -d "$case_dir" ] || continue
   label=$(basename "$case_dir")
   status=$(cat "$case_dir/status" 2>/dev/null || echo "?")
