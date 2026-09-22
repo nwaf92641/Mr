@@ -97,7 +97,13 @@ jobs:
               echo "## availability, verbatim:"
               grep -m3 -E 'API_AVAILABLE|API_UNAVAILABLE' "$h" || true
               echo "## interfaces and protocols declared:"
-              grep -oE '@(interface|protocol|class) +[A-Za-z0-9_]+' "$h" | sort -u
+              # A header that declares no Objective-C interface -- several MTL4
+              # headers are structs and enums -- made this grep fail, and under
+              # set -e with pipefail that killed the step in the middle of the
+              # listing. The measurement then never ran, and the verdict reported
+              # "compiler cannot see Metal 4" from a step that had not executed.
+              # A probe that cannot return "nothing here" is a probe that lies.
+              grep -oE '@(interface|protocol|class) +[A-Za-z0-9_]+' "$h" | sort -u || true
             } >> "$out"
           done
 

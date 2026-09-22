@@ -212,7 +212,12 @@ jobs:
       # whether it is there.
       - name: Dependency audit, read off the binaries
         run: |
-          set -euo pipefail
+          # Probes are allowed to fail here; the verdict below is not. The previous
+          # version ran under `set -euo pipefail` and died on its own first find,
+          # which is why a failed run uploaded an empty dxmt-dependencies.txt and no
+          # reason at all. What was wanted was a FAIL with a reason, and what was
+          # produced was a FAIL with nothing.
+          set -uo pipefail
           out="$RUNNER_TEMP/dxmt-dependencies.txt"
           : > "$out"
           fails=0
@@ -222,8 +227,25 @@ jobs:
             if [ "$2" = "FAIL" ]; then fails=$((fails + 1)); fi
           }
 
-          dylibs=$(find "$DXMT_SRC/build" -type f -name '*.dylib' | sort)
-          test -n "$dylibs" || { echo "::error::no dylib was produced to audit"; exit 1; }
+          # What is being looked at, before looking at anything.
+          {
+            echo "## what this audit is looking at"
+            echo "DXMT_SRC=${DXMT_SRC-<unset>}"
+            echo "LLVM_ROOT=${LLVM_ROOT-<unset>}"
+            echo "build directory: ${DXMT_SRC-}/build"
+            ls -la "${DXMT_SRC-}/build" 2>&1 | head -20
+          } | tee -a "$out"
+
+          if [ -z "${DXMT_SRC-}" ] || [ ! -d "${DXMT_SRC-}/build" ]; then
+            echo "::error title=the DXMT build directory is not there::DXMT_SRC=${DXMT_SRC-<unset>}. Nothing can be audited, so the audit fails rather than reporting an empty table as success."
+            exit 1
+          fi
+
+          dylibs=$(find "$DXMT_SRC/build" -type f -name '*.dylib' 2>/dev/null | sort)
+          if [ -z "$dylibs" ]; then
+            echo "::error title=no dylib was produced to audit::the build directory exists and holds none. There is nothing to audit and that is a failure."
+            exit 1
+          fi
           count=$(printf '%s\n' "$dylibs" | wc -l | tr -d ' ')
 
           leaked=0
@@ -255,6 +277,14 @@ jobs:
             esac
 
             deps=$(otool -L "$dylib" 2>/dev/null | tail -n +2 | awk '{print $1}' || true)
+            # Undefined symbols are the other half of a dependency question: what
+            # this file needs someone else to provide.
+            {
+              echo "-- undefined symbols it needs:"
+              nm -u "$dylib" 2>&1 | head -20 || true
+              echo "-- defined symbols it offers (first 10):"
+              nm -gU "$dylib" 2>&1 | head -10 || true
+            } >> "$out" 2>&1 || true
             if printf '%s\n' "$deps" | grep -qE '/Users/runner|/private/var/folders|/opt/homebrew'; then
               leaked=$((leaked + 1))
             fi
