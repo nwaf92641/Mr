@@ -153,6 +153,52 @@ run_case() {
 }
 
 echo
+# The loader dies inside the first second with SIGKILL and no output, while
+# /bin/echo and ./server/wineserver --version both run through the same harness and
+# return cleanly. So it is not the harness and it is not Wine's code in general: it
+# is this binary, killed at exec before dyld says anything. On Apple Silicon the
+# candidate for a silent SIGKILL at exec is the code signature and the load commands
+# the loader is linked with, which no other binary here uses:
+#
+#   -Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,...
+#
+# So the signature, the segments and the embedded plist are read off the binary, and
+# then the same binary is run again after an ad-hoc re-sign. If it runs after being
+# signed, the cause is the signature and the fix belongs in the build rather than in
+# Wine.
+echo
+echo "== signature of the loader =="
+codesign -dvvv "$loader" 2>&1 | head -20 || echo "codesign could not read it"
+if codesign --verify "$loader" 2>&1; then
+  echo "codesign --verify: accepted"
+else
+  echo "codesign --verify: REJECTED (the message above says why)"
+fi
+if codesign --verify "$loader" > "$out/codesign.txt" 2>&1; then
+  echo "codesign_verify=accepted" >> "$out/codesign.txt"
+else
+  echo "codesign_verify=rejected" >> "$out/codesign.txt"
+fi
+echo
+echo "== segments and pagezero =="
+otool -l "$loader" 2>&1 | grep -E 'segname|vmsize|fileoff|vmaddr' | head -16 || true
+echo
+echo "== embedded __TEXT,__info_plist, which only the loader has =="
+if otool -s __TEXT __info_plist "$loader" > "$out/info_plist.txt" 2>&1 && [ -s "$out/info_plist.txt" ]; then
+  head -6 "$out/info_plist.txt"
+else
+  echo "no __info_plist section found"
+fi
+echo
+echo "== for comparison, the control that works =="
+codesign -dvvv ./server/wineserver 2>&1 | head -8 || echo "codesign could not read wineserver"
+otool -s __TEXT __info_plist ./server/wineserver 2>&1 | head -3 || true
+echo
+echo "== what macOS itself logged, which is where an exec-time kill is explained =="
+log show --last 4m --style compact 2>/dev/null \
+  | grep -iE 'wine|amfi|taskgated|code signature|not valid|killed' \
+  | head -20 || echo "nothing usable from log show"
+
 echo "== 0a. control: a system binary through the same harness =="
 ( unset WINEDLLPATH; unset WINEPREFIX; run_case control_echo 10 /bin/echo wine-control )
 
@@ -174,10 +220,15 @@ echo "== 4. with a prefix that already exists =="
 echo "== 5. --help, in case only the argument path is at fault =="
 ( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" run_case help 30 "./$loader" --help )
 
+echo "== 6. the same binary after an ad-hoc re-sign =="
+( cp -p "$loader" "$out/wine-resigned" 2>/dev/null || cp "$loader" "$out/wine-resigned"
+  codesign --force --sign - "$out/wine-resigned" 2>&1 | head -3
+  unset WINEPREFIX; WINEDEBUG=-all run_case resigned 30 "$out/wine-resigned" --version )
+
 echo
 echo "== statuses =="
 ran=""
-for case_dir in "$out"/control_echo "$out"/control_wineserver "$out"/plain "$out"/dyld_trace "$out"/with_dllpath "$out"/with_prefix "$out"/help; do
+for case_dir in "$out"/control_echo "$out"/control_wineserver "$out"/plain "$out"/resigned "$out"/dyld_trace "$out"/with_dllpath "$out"/with_prefix "$out"/help; do
   [ -d "$case_dir" ] || continue
   label=$(basename "$case_dir")
   status=$(cat "$case_dir/status" 2>/dev/null || echo "?")
