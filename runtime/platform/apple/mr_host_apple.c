@@ -36,6 +36,7 @@
 #endif
 
 #include "mr_metal_probe.h"
+#include "mr_metalfx_probe.h"
 
 /* Bounded copy that cannot trip -Wformat-truncation on a fixed-size field. */
 static void mr_copy_field(char *dst, size_t dst_cap, const char *src) {
@@ -223,6 +224,19 @@ void mr_host_probe(mr_host_caps *caps) {
   caps->supports_argument_buffers_tier2 = gpu.argument_buffers_tier2;
   caps->metal3_available = gpu.metal3_available;
   caps->metal4_available = gpu.metal4_available;
+
+  /*
+   * Real hardware or a paravirtual device. A real Apple GPU answers yes to one
+   * of the MTLGPUFamilyApple families; the device the CI runner exposes answers
+   * no to all of them while still being a Metal device.
+   */
+  caps->real_apple_gpu = gpu.device_present && gpu.gpu_family != 0;
+
+  mr_metalfx_caps fx;
+  mr_metalfx_probe(&fx);
+  caps->metalfx_spatial = fx.spatial;
+  caps->metalfx_temporal = fx.temporal;
+  caps->metalfx_denoise = fx.denoise;
 
   if (gpu.max_buffer_length != 0) {
     caps->max_buffer_length = gpu.max_buffer_length;

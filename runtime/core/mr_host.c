@@ -29,6 +29,8 @@
 #endif
 #endif
 
+#include <stdio.h>
+
 #include "mr/mr_host.h"
 
 #include <string.h>
@@ -171,6 +173,10 @@ mr_backend mr_host_pick_backend(const mr_host_caps *caps, bool allow_metal4,
       "the device did not return an MTL4 command queue, so this GPU or OS "
       "combination has no Metal 4 support";
   static const char *k_chosen = "this device and OS support Metal 4";
+  static const char *k_paravirtual =
+      "the only Metal device is a paravirtual device, which is a device and not "
+      "an Apple GPU: this machine can build the graphics path and cannot verify "
+      "it, so REQUIRES REAL APPLE GPU VALIDATION";
 
   if (reason != NULL) *reason = NULL;
   if (caps == NULL) {
@@ -179,6 +185,17 @@ mr_backend mr_host_pick_backend(const mr_host_caps *caps, bool allow_metal4,
   }
   if (!caps->gpu_available) {
     if (reason != NULL) *reason = k_no_gpu;
+    return MR_BACKEND_NONE;
+  }
+
+  /*
+   * A paravirtual device before the family checks: it reports no family, so the
+   * Metal 3 branch below would describe it as a device that cannot do Metal 3,
+   * which is true and not the useful sentence. The useful sentence is that this
+   * machine has no GPU to verify against.
+   */
+  if (!caps->real_apple_gpu) {
+    if (reason != NULL) *reason = k_paravirtual;
     return MR_BACKEND_NONE;
   }
 
@@ -288,3 +305,44 @@ bool mr_host_jit_selftest(void) {
 #endif
 }
 
+
+size_t mr_host_describe_graphics(const mr_host_caps *caps, char *out,
+                                 size_t cap) {
+  if (out == NULL || cap == 0) {
+    return 0;
+  }
+  out[0] = '\0';
+  if (caps == NULL) {
+    return (size_t)snprintf(out, cap, "graphics: no capability record\n");
+  }
+
+  const char *reason = NULL;
+  mr_backend chosen = mr_host_pick_backend(caps, true, &reason);
+  int n = snprintf(out, cap,
+                   "graphics:\n"
+                   "  Metal available ..... %s\n"
+                   "  Metal 3 ............ %s\n"
+                   "  Metal 4 ............ %s\n"
+                   "  real Apple GPU ..... %s\n"
+                   "  GPU family ......... %d\n"
+                   "  unified memory ..... %s\n"
+                   "  MetalFX ............ spatial %s, temporal %s, denoise %s\n"
+                   "  recommended path ... %s\n"
+                   "  because ............ %s\n",
+                   caps->gpu_available ? "yes" : "no",
+                   caps->metal3_available ? "yes" : "no",
+                   caps->metal4_available ? "yes" : "no",
+                   caps->real_apple_gpu
+                       ? "yes"
+                       : "no, so no graphics path can be verified here",
+                   caps->gpu_family, caps->unified_memory ? "yes" : "no",
+                   caps->metalfx_spatial ? "yes" : "no",
+                   caps->metalfx_temporal ? "yes" : "no",
+                   caps->metalfx_denoise ? "yes" : "no",
+                   mr_backend_str(chosen), reason == NULL ? "" : reason);
+  if (n < 0) {
+    out[0] = '\0';
+    return 0;
+  }
+  return (size_t)n < cap ? (size_t)n : cap - 1u;
+}

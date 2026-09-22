@@ -72,6 +72,31 @@ typedef struct {
   bool metal3_available;
   bool metal4_available; /* MTL4CommandQueue et al. usable */
 
+  /*
+   * A Metal device that is not an Apple GPU.
+   *
+   * The arm64 macOS runner exposes a device called "Apple Paravirtual device":
+   * it answers every Metal query and reports no Apple GPU family. It is a Metal
+   * device and it is not hardware, and the difference is the difference between
+   * "this path ran" and "this path has never run anywhere". Kept as its own
+   * field rather than inferred from metal3_available == false, because the two
+   * facts belong to different questions and a report that conflated them would
+   * let a VM claim REAL APPLE GPU VERIFIED.
+   *
+   * No Apple API answers this by name. It is derived from the one fact Apple
+   * does report: a real Apple GPU matches a family in MTLGPUFamilyApple*, and a
+   * paravirtual device matches none.
+   */
+  bool real_apple_gpu;
+
+  /*
+   * MetalFX, optional. Recorded so an enhancement can be offered where the
+   * device supports it, never so that the frame path can require it.
+   */
+  bool metalfx_spatial;
+  bool metalfx_temporal;
+  bool metalfx_denoise;
+
   /* JIT / process model */
   bool jit_capable;   /* the CPU can execute freshly written code at all */
   bool jit_enabled;   /* it is enabled right now, not merely permitted */
@@ -137,6 +162,18 @@ bool mr_host_jit_selftest(void);
  */
 mr_backend mr_host_pick_backend(const mr_host_caps *caps, bool allow_metal4,
                                 const char **reason);
+
+/*
+ * Writes the graphics capability report: what Metal is there, which GPU family,
+ * whether the GPU is real hardware, which MetalFX effects exist, and which
+ * backend the runtime would choose and why.
+ *
+ * One function so the same sentences appear in the launch log, the test output
+ * and a bug report, and so the recommendation can be read without re-deriving
+ * it. Returns the number of characters written, excluding the terminator.
+ */
+size_t mr_host_describe_graphics(const mr_host_caps *caps, char *out,
+                                 size_t cap);
 
 #ifdef __cplusplus
 }

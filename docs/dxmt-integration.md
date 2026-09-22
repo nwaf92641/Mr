@@ -86,6 +86,59 @@ iPadOS build, where an rpath into a build directory does not exist:
 Recorded now because the iPadOS build is where it turns from an environment
 variable into a shipped decision.
 
+## Where a Metal 4 path would go inside DXMT, and what would earn its place
+
+The architecture decides this: Metal 4 enters through DXMT, not through a Mr
+backend. `docs/apple-graphics-stack.md` has the argument. What follows is the
+seam itself -- which files, which abstractions, and which Metal 4 feature is
+allowed to justify a change.
+
+### The seam
+
+DXMT already has an indirection between its D3D11 state tracking and the Metal
+objects it creates. The Metal 4 path does not need a new layer above DXMT; it
+needs a second implementation of the object-creation and submission calls that
+DXMT already makes through winemetal. In file terms, the places a Metal 4 path
+touches:
+
+| DXMT file | What is there now | What a Metal 4 path changes |
+| --- | --- | --- |
+| `src/dxmt/dxmt_device.cpp` | creates the `MTLDevice`, feature levels | also creates `MTL4CommandQueue` and the `MTL4Compiler`, and records whether it got them |
+| `src/dxmt/dxmt_context.cpp` | command buffer per frame, encoder per pass | `MTL4CommandAllocator` + `MTL4CommandBuffer`, reset instead of reallocated |
+| `src/dxmt/dxmt_texture.cpp` | texture and buffer creation, heap usage | residency sets attached to the allocator or command buffer |
+| `src/d3d11/d3d11_pipeline.cpp`, `d3d11_pipeline_cache.cpp` | `MTLRenderPipelineState` from airconv output, cached | `MTL4Compiler` when the pipeline is built, same `MTLLibrary` output |
+| `src/dxmt/dxmt_command.cpp`, `dxmt_command_list.hpp` | `setRenderPipelineState`, `setBuffer:…` per draw | `MTL4ArgumentTable` for the constant bindings |
+| `src/dxmt/dxmt_command_queue.cpp` | queue submission and completion | `MTL4CommandQueue` commit, with the same signal/wait semantics |
+| `src/winemetal/` | the thin C surface DXMT calls | the MTL4 entry points, added beside the Metal 3 ones rather than replacing them |
+
+Those paths are in the pinned tree; `third_party/dxmt.lock` holds the commit. A
+patch series should touch them in this order, one at a time, each patch building
+and running the triangle before the next one starts. `d3d11_pipeline_cache.cpp`
+is listed with the pipeline because a Metal 4 pipeline has to be reachable
+through the same cache, or shaders get compiled twice per game.
+
+### Which Metal 4 features are allowed to justify work
+
+An estimate is not a reason. Each row below is a cost DXMT actually pays on the
+Metal 3 path, and the test for each change is a measurement of that cost.
+
+| Metal 4 feature | Cost it removes on the DX11 path | Verdict |
+| --- | --- | --- |
+| `MTL4CommandAllocator`, `MTL4CommandBuffer` | per-frame command buffer allocation and its retain/release traffic | worth measuring first, it is the largest single CPU cost per frame |
+| `MTL4ArgumentTable` | one binding call per resource per draw; DX11 titles draw with many small constant buffers | worth doing, and the one most likely to show up in a frame-time profile |
+| Residency sets | per-resource residency tracking by the driver, for a working set that barely changes between frames | worth doing, and it is the one that also helps on 8 GB devices |
+| `MTL4RenderCommandEncoder` | encoder creation and its barriers | comes with the allocator change, not a separate job |
+| `MTL4Compiler` | pipeline construction, not submission | only if pipeline creation shows up in a profile; shader compilation is already cached |
+| Barriers and explicit synchronisation | DXMT's implicit tracking | only after the allocator change, because the allocator changes what is implicit |
+| Ray tracing | nothing on a DX11 path | not applicable. D3D11 has no ray tracing, and DXMT's D3D12 path is out of scope |
+| MetalFX `MTL4FX*` variants | nothing yet | deferred with MetalFX itself; see the MetalFX section of the Apple stack document |
+
+Nothing in this table is implemented. What exists is the capability layer that
+decides which path is even available, and that layer is tested. The next step is
+the Wine stage, because without it there is no window, no swap chain and no
+`CAMetalLayer`, so the frame path has nowhere to present -- and because Wine
+brings `d3dcompiler_47`, which is what the D3D11 shader path is missing.
+
 ## Stages, and what each one is allowed to claim
 
 Each stage claims exactly one level and no more. The levels are defined in

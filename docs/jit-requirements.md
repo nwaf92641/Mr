@@ -1,5 +1,7 @@
 # JIT on iPadOS: the real requirements
 
+See `docs/apple-graphics-stack.md` for where each Apple technology sits on the path, what is build-time versus runtime, and what is claimed today.
+
 FEX translates x86-64 into ARM64 at run time. That means writing machine code
 into memory and then executing it, on a platform designed to prevent exactly
 that. This file records what is actually required, and what an application cannot

@@ -25,6 +25,7 @@
 #include <stdio.h>
 
 #include "mr_metal_probe.h"
+#include "mr_metalfx_probe.h"
 
 int main(void) {
   mr_metal_probe_result r;
@@ -36,6 +37,17 @@ int main(void) {
   printf("unified_memory=%d\n", r.unified_memory ? 1 : 0);
   printf("metal3_available=%d\n", r.metal3_available ? 1 : 0);
   printf("metal4_available=%d\n", r.metal4_available ? 1 : 0);
+  /* Real hardware or a paravirtual device. Same rule as mr_host_apple.c: a real
+   * Apple GPU matches a family in MTLGPUFamilyApple*, a paravirtual device
+   * matches none. Derived here rather than probed twice. */
+  printf("real_apple_gpu=%d\n",
+         (r.device_present && r.gpu_family != 0) ? 1 : 0);
+
+  mr_metalfx_caps fx;
+  mr_metalfx_probe(&fx);
+  printf("metalfx_spatial=%d\n", fx.spatial ? 1 : 0);
+  printf("metalfx_temporal=%d\n", fx.temporal ? 1 : 0);
+  printf("metalfx_denoise=%d\n", fx.denoise ? 1 : 0);
 
   if (!r.device_present) {
     printf("\nno Metal device at all\n\nREQUIRES REAL APPLE GPU VALIDATION\n");
