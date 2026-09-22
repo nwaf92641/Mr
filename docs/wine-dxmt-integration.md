@@ -54,12 +54,36 @@ machine type out of each DLL it builds:
 
 | | machine type | what it is |
 | --- | --- | --- |
-| `IMAGE_FILE_MACHINE_ARM64` | `0xAA64` | arm64 Windows code |
+| `IMAGE_FILE_MACHINE_ARM64` | `0xAA64` | plain arm64 Windows code |
 | `IMAGE_FILE_MACHINE_ARM64EC` | `0xA641` | arm64 code with the ARM64EC ABI, which can call and be called by x86-64 code in the same process |
+| `IMAGE_FILE_MACHINE_ARM64X` | `0xA64E` | one PE carrying both an ARM64 and an ARM64EC path, loadable by either kind of process |
 
 A module built for the wrong one of those links and then fails at load. Nothing
 in this project treats a DLL as ARM64EC because the build was asked for ARM64EC,
 or because it is in a directory named arm64ec.
+
+### What the build actually emits: ARM64X
+
+The first run of the Wine workflow reached the machine-type check with a built
+`d3d11.dll` and this:
+
+```
+d3d11.dll | dlls/d3d11/aarch64-windows/d3d11.dll | Machine: IMAGE_FILE_MACHINE_ARM64X (0xA64E)
+```
+
+`--enable-archs=aarch64,arm64ec` does not produce two DLLs per module. It produces
+one **ARM64X** module per module: a hybrid PE with both paths inside it, sitting in
+the `aarch64-windows` directory. That is a better fit for this project than what
+was expected, because ARM64X is exactly the mixed-process format -- the same
+property that makes it loadable by an ARM64EC process is the property this runtime
+needs when translated x86-64 code and Wine's arm64 code share one process.
+
+The check in the workflow demanded `0xA641` and therefore failed a correct build.
+The machine type was the fact and it was read correctly; the judgement about which
+machine types are acceptable was wrong, and that is the kind of mistake the check
+exists to surface rather than hide. It now accepts ARM64EC or ARM64X, prints each
+module's sections into `hybrid-details.txt` so the EC half is evidence in the
+artifact, and still fails on a plain ARM64 module.
 
 ### Why this project wants ARM64EC at all
 

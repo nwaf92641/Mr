@@ -273,14 +273,34 @@ jobs:
           done
           test "$missing" -eq 0 || exit 1
 
-          # AMR64EC where ARM64EC was required. If the only d3d11.dll present is
-          # aarch64, this fails and says so, which is the point.
-          arm64ec_dlls=$(grep -c 'ARM64EC' "$RUNNER_TEMP/pe-machines.txt" || true)
-          echo "modules with machine type ARM64EC: $arm64ec_dlls"
-          test "$arm64ec_dlls" -gt 0 || {
-            echo "::error::no module was built as ARM64EC (0xA641). A cross build that produced aarch64 (0xAA64) instead would link and fail at load."
+          # Three machine types are in play, and the build's answer was the third:
+          #
+          #   ARM64    0xAA64   plain arm64 Windows code
+          #   ARM64EC  0xA641   arm64 code with the ARM64EC ABI
+          #   ARM64X   0xA64E   one PE carrying both paths, loadable by either
+          #
+          # With --enable-archs=aarch64,arm64ec Wine emits ARM64X: the modules are
+          # not produced twice, they are produced once as a hybrid. That is better
+          # than two separate DLLs here, because ARM64X is precisely the "x86-64
+          # code and arm64 code in one process" case this project is built around.
+          #
+          # The first version of this check demanded 0xA641 and therefore failed a
+          # correct build. The machine type is the fact; which of the three is
+          # acceptable was the judgement, and it was wrong.
+          capable=$(grep -cE 'ARM64EC|ARM64X' "$RUNNER_TEMP/pe-machines.txt" || true)
+          hybrid=$(grep -c 'ARM64X' "$RUNNER_TEMP/pe-machines.txt" || true)
+          echo "ARM64EC-capable modules: $capable, of which ARM64X hybrids: $hybrid"
+          test "$capable" -gt 0 || {
+            echo "::error::no module is ARM64EC or ARM64X. A plain ARM64 (0xAA64) module links and fails at load inside a mixed process."
             exit 1
           }
+          # What is inside a hybrid module, printed rather than asserted, so the EC
+          # half is evidence in the artifact instead of a claim in a comment.
+          while IFS= read -r dll; do
+            echo "--- $dll"
+            "$MINGW_ROOT/bin/llvm-readobj" --file-headers "$dll" | grep -i 'Machine:' || true
+            "$MINGW_ROOT/bin/llvm-readobj" --sections "$dll" | grep -iE 'Name: ' | head -12 || true
+          done < "$RUNNER_TEMP/produced-dlls.txt" | tee "$RUNNER_TEMP/hybrid-details.txt"
 
       # Symbols, not directories. d3d11 must export the entry point the runtime
       # calls, and d3dcompiler_47 must export the one that turns HLSL into DXBC.
@@ -348,6 +368,7 @@ jobs:
             ${{ runner.temp }}/build-plan.txt
             ${{ runner.temp }}/produced-dlls.txt
             ${{ runner.temp }}/pe-machines.txt
+            ${{ runner.temp }}/hybrid-details.txt
             ${{ runner.temp }}/verification.txt
             ${{ runner.temp }}/wine/build-arm64ec/dlls/d3d11/**/*.dll
             ${{ runner.temp }}/wine/build-arm64ec/dlls/dxgi/**/*.dll
