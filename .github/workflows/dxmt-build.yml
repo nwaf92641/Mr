@@ -230,25 +230,31 @@ jobs:
           non_arm64=0
           libcxx="none found"
           llvm="none found"
+          # Every otool call is allowed to fail. The first version of this step
+          # guarded nothing, so one dylib without an install name killed the step
+          # inside a block whose output went to a file -- which is why a failed run
+          # produced no evidence at all, only a red step. A diagnostic step that
+          # cannot survive the thing it is diagnosing is not a diagnostic step.
           for dylib in $dylibs; do
+            echo "auditing $dylib"
             {
               echo "### $dylib"
-              file "$dylib"
+              file "$dylib" || true
               echo "-- install name:"
-              otool -D "$dylib" | tail -1
+              otool -D "$dylib" 2>&1 | tail -1 || true
               echo "-- rpaths:"
-              otool -l "$dylib" | grep -A2 LC_RPATH | grep -E 'path ' || echo "(none)"
+              otool -l "$dylib" 2>&1 | grep -A2 LC_RPATH | grep -E 'path ' || echo "(none)"
               echo "-- dependencies:"
-              otool -L "$dylib" | tail -n +2
+              otool -L "$dylib" 2>&1 | tail -n +2 || true
               echo ""
-            } >> "$out"
+            } >> "$out" 2>&1 || true
 
             case "$(file "$dylib")" in
               *arm64*) ;;
               *) non_arm64=$((non_arm64 + 1)) ;;
             esac
 
-            deps=$(otool -L "$dylib" | tail -n +2 | awk '{print $1}')
+            deps=$(otool -L "$dylib" 2>/dev/null | tail -n +2 | awk '{print $1}' || true)
             if printf '%s\n' "$deps" | grep -qE '/Users/runner|/private/var/folders|/opt/homebrew'; then
               leaked=$((leaked + 1))
             fi
@@ -417,6 +423,8 @@ jobs:
           name: dxmt-build-evidence
           path: |
             ${{ runner.temp }}/dxmt-evidence.txt
+            ${{ runner.temp }}/dxmt-dependencies.txt
+            ${{ runner.temp }}/dxmt-verification.txt
             ${{ runner.temp }}/dxmt-build.log
             ${{ runner.temp }}/dx11-probe.log
             ${{ runner.temp }}/gpu-precondition.log
