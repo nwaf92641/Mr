@@ -29,12 +29,23 @@ jobs:
     # A full Wine build is far longer than this; the timeout is generous because
     # the build is the work.
     timeout-minutes: 240
-    env:
-      WINE_SRC: ${{ runner.temp }}/wine
-      MINGW_ROOT: ${{ runner.temp }}/llvm-mingw
-      MINGW_VERSION: '20260908'
     steps:
       - uses: actions/checkout@v4
+
+      # Paths are set here rather than in a job-level `env:` block, because the
+      # `runner` context is not available there: `env: WINE_SRC: ${{ runner.temp }}/wine`
+      # at job level makes the whole workflow file invalid, and GitHub's answer is
+      # "Unrecognized named-value: 'runner'" with no jobs created at all. RUNNER_TEMP
+      # is a real environment variable inside a step, so expanding it here and
+      # exporting through GITHUB_ENV gives later steps the same values.
+      - name: Paths
+        run: |
+          set -euo pipefail
+          echo "WINE_SRC=$RUNNER_TEMP/wine" >> "$GITHUB_ENV"
+          echo "MINGW_ROOT=$RUNNER_TEMP/llvm-mingw" >> "$GITHUB_ENV"
+          echo "MINGW_VERSION=20260908" >> "$GITHUB_ENV"
+          echo "WINE_SRC=$RUNNER_TEMP/wine"
+          echo "MINGW_ROOT=$RUNNER_TEMP/llvm-mingw"
 
       # Recorded, not assumed. A build report that does not say which compiler
       # and which SDK produced it is not reproducible.
