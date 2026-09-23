@@ -208,15 +208,15 @@ echo "== 2. another Wine binary from this same build, which is known to work =="
 echo "== 3. the loader, relinked for a 16KB page machine =="
 ( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" run_case plain 30 "./$loader" --version )
 
-echo "== 3b. the same source linked without the embedded Info.plist =="
-( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" run_case noplist 30 ./loader/wine-noplist --version )
+echo "== 3b. the same source linked with no custom flags at all =="
+( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" run_case noflags 30 ./loader/wine-noflags --version )
 
 echo "== 4. the same loader with --help =="
 ( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" run_case help 30 "./$loader" --help )
 
 echo
 echo "== statuses =="
-for case_dir in "$out"/control_echo "$out"/control_wineserver "$out"/plain "$out"/noplist "$out"/help; do
+for case_dir in "$out"/control_echo "$out"/control_wineserver "$out"/plain "$out"/noflags "$out"/help; do
   [ -d "$case_dir" ] || continue
   printf '%-20s status=%-5s %s\n' "$(basename "$case_dir")" \
     "$(cat "$case_dir/status" 2>/dev/null || echo '?')" \
@@ -224,11 +224,11 @@ for case_dir in "$out"/control_echo "$out"/control_wineserver "$out"/plain "$out
 done
 
 # One verdict, from the loader itself, whichever variant produced it.
-for variant in plain noplist; do
+for variant in plain noflags; do
   if [ "$(cat "$out/$variant/status" 2>/dev/null)" = "0" ]; then
     echo "verdict: the loader runs as $variant and printed: $(head -1 "$out/$variant/stdout" 2>/dev/null)" | tee "$out/verdict.txt"
     exit 0
   fi
 done
-echo "verdict: the loader does not run in either variant; see plain/log.txt and noplist/log.txt" | tee "$out/verdict.txt"
+echo "verdict: the loader does not run in either variant; see plain/log.txt and noflags/log.txt" | tee "$out/verdict.txt"
 exit 1

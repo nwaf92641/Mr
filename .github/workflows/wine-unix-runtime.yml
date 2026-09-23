@@ -219,46 +219,54 @@ jobs:
           fi
           echo "the layout changed, so the new flags reached the linker"
 
-          # Two variables are left, and they are separable. The previous attempt to
-          # test the embedded plist was void, like the alignment one: the flags come
-          # from the generated Makefile, so a link without -sectcreate never happened
-          # and "both variants die" compared a binary with itself.
+          # The comparison that matters is with wineserver, which runs:
           #
-          # So the flag is removed where it is written, the relink is proved by hash,
-          # and three twenty-line programs linked the same three ways say whether
-          # these flags kill a program at all, or whether it is Wine's loader code.
-          cp -p loader/wine loader/wine-16k
+          #   loader/wine   __PAGEZERO 0x4000   __TEXT at 0x4000        Killed: 9
+          #   wineserver    __PAGEZERO 4GB      __TEXT at 0x100000000   runs
+          #
+          # Both are adhoc linker-signed, codesign accepts both, and neither is the
+          # difference. The difference is where the image sits: this loader is linked
+          # to live near address zero, and every other executable on this machine
+          # lives at a 4GB PIE base. Wine's -segalign and -pagezero_size flags exist to
+          # match the preloader's reserved areas, and the preloader is not used on
+          # 64-bit.
+          #
+          # Every earlier attempt to test this was void because the flags live in the
+          # generated Makefile and `make -C loader WINELOADER_LDFLAGS=...` never
+          # changed the link line: four flag sets produced one sha256. They are
+          # removed where they are written now, and the relink has to change the hash
+          # or this step fails.
+          echo "--- removing every custom link flag from the generated Makefile"
+          before_refs=$(grep -c 'pagezero_size\|segalign\|__info_plist' Makefile 2>/dev/null || echo 0)
+          sed -e 's|,-segalign,0x1000||g' -e 's|,-segalign,0x4000||g' \
+              -e 's|,-pagezero_size,0x1000||g' -e 's|,-pagezero_size,0x4000||g' \
+              -e 's|,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist||g' \
+              Makefile > Makefile.clean && mv Makefile.clean Makefile
+          after_refs=$(grep -c 'pagezero_size\|segalign\|__info_plist' Makefile 2>/dev/null || echo 0)
+          echo "references in the link line: $before_refs before, $after_refs after"
 
-          echo "--- dropping the embedded plist flag from the generated Makefile"
-          if grep -q -- '-sectcreate,__TEXT,__info_plist' Makefile; then
-            sed 's|,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist||g' Makefile > Makefile.noplist \
-              && mv Makefile.noplist Makefile
-            echo "removed from Makefile"
-          else
-            echo "the flag is not in Makefile, so it is not in the link line"
-          fi
           rm -f loader/wine
-          make -C loader -j"$ncpu" > loader-noplist-relink.log 2>&1 || tail -10 loader-noplist-relink.log
-          no_plist_layout="$(layout_of loader/wine)"
-          no_plist_hash="$(shasum -a 256 loader/wine | cut -c1-12)"
-          echo "--- no plist: $no_plist_layout sha256=$no_plist_hash"
-          if [ "$no_plist_hash" = "$new_hash" ]; then
-            echo "::error title=the no-plist relink produced the same binary::the plist flag is not in the link line either, so this variable cannot be tested this way."
+          make -C loader -j"$ncpu" > loader-noflags.log 2>&1 || tail -10 loader-noflags.log
+          noflags_layout="$(layout_of loader/wine)"
+          noflags_hash="$(shasum -a 256 loader/wine | cut -c1-12)"
+          echo "--- no flags: $noflags_layout sha256=$noflags_hash"
+          if [ "$noflags_hash" = "$new_hash" ]; then
+            echo "::error title=removing the flags changed nothing::the flags are not in this link line, so the layout cannot be changed from here and this is not a test."
           fi
-          cp -p loader/wine loader/wine-noplist
+          cp -p loader/wine loader/wine-noflags
 
-          # Do these flags kill a program, or is it Wine's loader code? Neither probe
-          # does anything but print a line, so the answer is about the link.
+          # The previous probes did not compile and the reason was suppressed by the
+          # 2>/dev/null that was meant to keep the log tidy. A probe whose failure
+          # cannot be read is worse than no probe.
+          echo "--- clang, with its errors shown this time"
+          clang --version 2>&1 | head -1 || echo "clang is not on PATH"
           printf '#include <stdio.h>\nint main(void) { printf("linked and ran\\n"); return 0; }\n' > probe.c
-          clang -o probe_plain probe.c 2>/dev/null || echo "probe_plain did not compile"
-          clang -Wl,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist -o probe_plist probe.c 2>/dev/null || echo "probe_plist did not compile"
-          clang -Wl,-segalign,0x4000,-pagezero_size,0x4000 -o probe_align probe.c 2>/dev/null || echo "probe_align did not compile"
-          for probe in probe_plain probe_plist probe_align; do
-            if [ -x "$probe" ]; then
-              ./$probe > "$probe.out" 2>&1
-              printf '%-14s status=%-4s %s\n' "$probe" "$?" "$(head -1 "$probe.out")"
-            fi
-          done
+          if clang probe.c -o probe_plain; then
+            ./probe_plain > probe.out 2>&1
+            echo "probe_plain status=$? output=$(head -1 probe.out)"
+          else
+            echo "clang could not link a trivial program, see the error above"
+          fi
 
           # Which name Wine gave the loader, read off the disk instead of assumed.
           # The earlier run checked loader/wine64 only, found nothing, and reported
@@ -418,7 +426,7 @@ jobs:
           # The verdict reads the status files the diagnostic wrote, not the fact
           # that some step finished. Each configuration has its own directory, so a
           # status cannot be lost between a run and its log.
-          configs="control_echo control_wineserver plain noplist help"
+          configs="control_echo control_wineserver plain noflags help"
           status_of() {
             f="$RUNNER_TEMP/loader-diag/$1/status"
             if [ -f "$f" ] && [ "$(cat "$f")" = 0 ]; then echo yes; else echo no; fi
