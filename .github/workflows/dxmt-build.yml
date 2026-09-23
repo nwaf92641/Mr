@@ -211,6 +211,14 @@ jobs:
       # LLVM to do it, so the question about LLVM is where it resolves to and not
       # whether it is there.
       - name: Dependency audit, read off the binaries
+        # The step that does the audit was the one step in this file without the
+        # environment the audit reads: DXMT_SRC arrived unset, the step said so in
+        # its own output, and then failed on "the build directory is not there" --
+        # which is a true statement about an empty variable and a false statement
+        # about DXMT. The evidence it never produced is the evidence this project
+        # needed, so the variable is now passed the same way every other step gets it.
+        env:
+          DXMT_SRC: ${{ runner.temp }}/dxmt
         run: |
           # Probes are allowed to fail here; the verdict below is not. The previous
           # version ran under `set -euo pipefail` and died on its own first find,
