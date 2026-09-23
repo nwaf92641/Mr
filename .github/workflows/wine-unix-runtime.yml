@@ -293,6 +293,26 @@ jobs:
           after_refs=$(grep -c 'pagezero_size\|segalign\|__info_plist' Makefile 2>/dev/null || echo 0)
           echo "references in the link line: $before_refs before, $after_refs after"
 
+          # Where the loader sits matters to Wine's own allocator, and the next
+          # failure says so: Wine tried to map a 1MB area at 0x100000000 and the
+          # system refused --
+          #   err:virtual:try_map_free_area mmap() error Cannot allocate memory,
+          #   range 0x100000000-0x100100000
+          # This loader links at the default PIE base, which is that address, so
+          # Wine's first allocation lands inside its own loader. Wine on x86_64
+          # macOS does not have this problem because configure.ac puts the loader
+          # at 0x200000000 there (-image_base,0x200000000, in WINELOADER_LDFLAGS for
+          # the no_huge path). The same base for the same reason, from Wine's own
+          # flags for the platform where it already had to solve this, and the
+          # layout is printed afterwards so the base is read rather than assumed.
+          sed -i '' -e 's|^\(WINELOADER_LDFLAGS *=.*\)$|\1 -Wl,-image_base,0x200000000|' Makefile
+          if ! grep -q 'image_base' Makefile; then
+            echo "::error title=the image base was not set::WINELOADER_LDFLAGS is not in the generated Makefile in the form this expects, so the loader would link at the default base and Wine's allocations would collide with it."
+            grep -n 'LDFLAGS' Makefile | head -10 || true
+            exit 1
+          fi
+          echo "--- the loader link flags now: $(grep -m1 'WINELOADER_LDFLAGS' Makefile | cut -c1-120)"
+
           rm -f loader/wine
           make -C loader -j"$ncpu" > loader-noflags.log 2>&1 || tail -10 loader-noflags.log
           noflags_layout="$(layout_of loader/wine)"
