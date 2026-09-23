@@ -94,3 +94,30 @@ passing. The address is therefore set and left free, which is what Wine's own
 mapping code needs, and the `WINE_TOP_DOWN` reservation on x86_64 works because the
 reserved area there is registered with `mmap_add_reserved_area()` and not left as a
 bare mapping.
+
+## The fourth measurement: the failure was a classification, not an address
+
+Registering the process mapped regions as reserved was tried next, on the reading that
+Wine allocator treats mapped addresses as free. The run answered with the same line as
+before, `try_map_free_area mmap() error Cannot allocate memory, range
+0x100000000-0x100030000`, and a segfault after it, so the registration was not the lever
+and was dropped from the patch.
+
+`anon_mmap_tryfixed()` is the lever. Its macOS branch maps with `mach_vm_map` and
+`VM_FLAGS_FIXED`, and translates the result like this:
+
+```c
+errno = (ret == KERN_NO_SPACE ? EEXIST : ENOMEM);
+```
+
+The kernel answers a fixed mapping over the main executable image with
+`KERN_PROTECTION_FAILURE`, not `KERN_NO_SPACE`, so a range that is plainly occupied is
+reported as `ENOMEM`. `try_map_free_area()` stops at any failure that is not `EEXIST`,
+so Wine gives up instead of walking on to the next free area. On the platforms that have
+`MAP_FIXED_NOREPLACE` or `MAP_TRYFIXED` the kernel answers `EEXIST` itself and this
+distinction never comes up.
+
+The patch asks whether the range is mapped with `mach_vm_region`, which is the same
+question `reserve_area()` asks in this file, and reports `EEXIST` when something is
+there. The loader keeps the address the linker gave it, Wine skips that range, and the
+run after this one is the one that says whether the PE program gets to print.

@@ -1,7 +1,43 @@
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -3700,7 +3700,75 @@
+@@ -615,7 +615,34 @@
+     }
+     else
+     {
+-        errno = (ret == KERN_NO_SPACE ? EEXIST : ENOMEM);
++        /* mach_vm_map with VM_FLAGS_FIXED does not distinguish "this range is taken"
++         * from other failures here, and the difference is what the caller does with
++         * it. try_map_free_area() walks the free areas of Wine's own bookkeeping and
++         * stops at the first mapping failure that is not EEXIST:
++         *   err:virtual:try_map_free_area mmap() error Cannot allocate memory,
++         *   range 0x100000000-0x100030000, unix_prot 0.
++         * The range it stopped at is the main executable's own image, which Wine has
++         * no record of, and the kernel answers a fixed mapping over it with
++         * KERN_PROTECTION_FAILURE rather than KERN_NO_SPACE -- so Wine reports ENOMEM
++         * and gives up, where EEXIST would have moved it to the next free area.
++         * Whether the range is mapped is asked with mach_vm_region, the same question
++         * reserve_area() asks a few hundred lines above. */
++        {
++            mach_vm_address_t query = (mach_vm_address_t)start;
++            mach_vm_address_t target = (mach_vm_address_t)start + size;
++            mach_vm_size_t region_size = 0;
++            vm_region_basic_info_data_64_t info;
++            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
++            mach_port_t object = MACH_PORT_NULL;
++            kern_return_t probe = mach_vm_region( mach_task_self(), &query, &region_size,
++                                                  VM_REGION_BASIC_INFO_64,
++                                                  (vm_region_info_t)&info, &count, &object );
++
++            if (probe == KERN_SUCCESS && query < target)
++                errno = EEXIST;
++            else
++                errno = (ret == KERN_NO_SPACE ? EEXIST : ENOMEM);
++        }
+         ptr = MAP_FAILED;
+     }
+ #else
+@@ -3700,6 +3727,30 @@
          for (i = 0; (*preload_info)[i].size; i++)
              mmap_add_reserved_area( (*preload_info)[i].addr, (*preload_info)[i].size );
  
@@ -29,51 +65,6 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 +    user_shared_data = (void *)0x7ff000000000;
 +    ERR( "arm64 shared user data page: %p (host limit %p, user limit %p, as limit %p)\n",
 +         user_shared_data, host_addr_space_limit, user_space_limit, address_space_limit );
-+#endif
      mmap_init( preload_info ? *preload_info : NULL );
-+
-+#if defined(__APPLE__) && defined(__aarch64__)
-+    /* Wine's reserved_areas list holds the holes this process reserved, and every
-+     * region that is already mapped is missing from it, so the allocator treats
-+     * mapped addresses as free. reserve_area() above shows the shape of the
-+     * problem: on macOS it walks the process with mach_vm_region and registers the
-+     * holes, never the mapped regions.
-+     *
-+     * On this platform that has a concrete consequence. macOS has nothing below the
-+     * 4GB line, so the first area Wine hands out is 0x100000000, which is where this
-+     * loader's own image is mapped, and the kernel refuses to map over the main
-+     * executable's text:
-+     *   err:virtual:try_map_free_area mmap() error Cannot allocate memory,
-+     *   range 0x100000000-0x100030000
-+     *   err:virtual:map_image_into_view failed to set 60000020 protection on
-+     *   load_d3d11.exe section .text, noexec filesystem?
-+     * On x86_64 macOS Wine never sees this because the preloader reserves the low
-+     * range and registers it as reserved. There is no preloader here, so each mapped
-+     * region is registered, which is the same list reserve_area() writes to.
-+     *
-+     * Nothing below 0x100000000 is skipped: that is where Wine's own small
-+     * reservations would go, and those are holes rather than mapped regions, so they
-+     * are still seen as free by the allocator. */
-+    {
-+        mach_vm_address_t addr = 0x100000000;
-+        mach_vm_address_t limit = (mach_vm_address_t)address_space_limit;
-+
-+        while (addr < limit)
-+        {
-+            mach_vm_size_t size = 0;
-+            vm_region_basic_info_data_64_t info;
-+            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-+            mach_port_t object = MACH_PORT_NULL;
-+
-+            if (mach_vm_region( mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64,
-+                                (vm_region_info_t)&info, &count, &object ) != KERN_SUCCESS)
-+                break;
-+            if (size && !(info.protection & VM_PROT_NONE))
-+                mmap_add_reserved_area( (void *)addr, (SIZE_T)size );
-+            addr += size;
-+        }
-+    }
-+#endif
  
      if ((preload = getenv("WINEPRELOADRESERVE")))
-     {
