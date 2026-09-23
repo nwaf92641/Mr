@@ -181,7 +181,7 @@ jobs:
           # Saved before the next build overwrites loader/wine, so that the three
           # variants stay three distinct binaries.
           cp -p loader/wine loader/wine-align4k
-          for candidate in loader/wine loader/wine-with-plist loader/wine-align4k loader/wine-default; do
+          for candidate in loader/wine-configured loader/wine-align16k loader/wine-default; do
             [ -e "$candidate" ] || continue
             printf '%s: ' "$candidate"
             if otool -s __TEXT __info_plist "$candidate" >/dev/null 2>&1 && otool -s __TEXT __info_plist "$candidate" | grep -q '[0-9a-f]'; then
@@ -191,36 +191,68 @@ jobs:
             fi
           done
 
-          # The last candidate is the segment layout. This loader is the only binary
-          # here linked with -Wl,-segalign,0x1000,-pagezero_size,0x1000, and otool
-          # reports __PAGEZERO vmsize 0x1000 with __TEXT at vmaddr 0x1000: a 4KB
-          # alignment on a machine whose page size is 16KB. wineserver, which runs
-          # and prints its version, is linked with the linker's defaults.
+          # The layout is the candidate, and this time the rebuild is proved to have
+          # happened. The previous version rebuilt loader/wine three times and the
+          # third binary had byte-for-byte the same 4KB layout as the first, because
+          # `make` had nothing to do: nothing was deleted, so nothing was relinked,
+          # and "all the variants die" meant the variable had not been changed rather
+          # than that it had been tested.
           #
-          # So a third loader is built with no custom link flags at all, and the
-          # segments of all of them are printed together. The link flag, the embedded
-          # plist and the layout were three separate variables; two are gone.
-          echo "--- building a third loader with the linker's default flags"
-          make -C loader WINELOADER_LDFLAGS="" clean >/dev/null 2>&1 || true
-          if make -C loader WINELOADER_LDFLAGS="" -j"$ncpu" > loader-default.log 2>&1; then
-            cp -p loader/wine loader/wine-default
-            echo "built as loader/wine-default"
-          else
-            echo "the default-flags build failed; see loader-default.log"
-            tail -20 loader-default.log || true
-          fi
+          # The evidence for the candidate, from the run that measured it:
+          #
+          #   hw.pagesize                                    16384
+          #   loader/wine     __PAGEZERO 0x1000  __TEXT at 0x1000     dies
+          #   wineserver      __PAGEZERO 4GB     __TEXT at 0x100000000  runs
+          #
+          # 4KB alignment on a 16KB page machine is a mapping the kernel refuses, and
+          # it refuses it silently and instantly, which is exactly what was observed:
+          # Killed: 9, zero bytes on every channel, nothing from dyld.
+          #
+          # So each variant is now built by deleting the binary first, and each is
+          # kept under its own name with its hash and its layout printed. A variant
+          # whose layout did not change is reported as such instead of being counted
+          # as a result.
+          build_loader() {
+            name="$1"
+            flags="$2"
+            rm -f loader/wine
+            if make -C loader WINELOADER_LDFLAGS="$flags" -j"$ncpu" > "loader-$name.log" 2>&1; then
+              cp -p loader/wine "loader/wine-$name"
+              echo "built loader/wine-$name with WINELOADER_LDFLAGS='$flags'"
+            else
+              echo "the $name build failed; see loader-$name.log"
+              tail -10 "loader-$name.log" || true
+            fi
+          }
+
+          echo "--- rebuilding each variant from scratch"
+          cp -p loader/wine loader/wine-configured
+          build_loader align4k "-Wl,-segalign,0x1000,-pagezero_size,0x1000"
+          build_loader align16k "-Wl,-segalign,0x4000,-pagezero_size,0x4000"
+          build_loader default ""
+          cp -p loader/wine-configured loader/wine
 
           echo "--- the page size these binaries run on, and their segment layout"
           echo "hw.pagesize: $(sysctl -n hw.pagesize 2>/dev/null || echo unavailable)"
-          for binary in loader/wine loader/wine-with-plist loader/wine-default server/wineserver; do
+          layouts=""
+          for binary in loader/wine loader/wine-configured loader/wine-align4k loader/wine-align16k loader/wine-default loader/wine-with-plist server/wineserver; do
             [ -e "$binary" ] || continue
-            echo "### $binary"
-            otool -l "$binary" 2>/dev/null | awk '
+            layout=$(otool -l "$binary" 2>/dev/null | awk '
               /segname/ { seg = $2 }
               /vmaddr/ { vm = $2 }
-              /vmsize/ { print "    " seg " vmaddr " vm " vmsize " $2 }
-            ' | head -5
+              /vmsize/ { if (seg == "__PAGEZERO") print "pagezero=" $2; if (seg == "__TEXT" && !t) { print "text_vmaddr=" vm; t = 1 } }
+            ' | tr "\n" " ")
+            hash=$(shasum -a 256 "$binary" 2>/dev/null | cut -c1-12)
+            echo "$(printf '%-28s' "$binary") $layout  sha256=$hash"
+            layouts="$layouts ; $binary $layout"
           done
+
+          # The rebuild is only an experiment if the layout actually changed.
+          if printf '%s' "$layouts" | grep 'wine-default' | grep -q 'text_vmaddr=0x0000000000001000'; then
+            if printf '%s' "$layouts" | grep 'wine-align16k' | grep -q 'text_vmaddr=0x0000000000001000'; then
+              echo "WARNING: every variant still has a 4KB __TEXT, so no variant differs from the configured build and the layout variable was NOT changed by these flags"
+            fi
+          fi
 
           # Which name Wine gave the loader, read off the disk instead of assumed.
           # The earlier run checked loader/wine64 only, found nothing, and reported
@@ -371,7 +403,7 @@ jobs:
           # The verdict reads the status files the diagnostic wrote, not the fact
           # that some step finished. Each configuration has its own directory, so a
           # status cannot be lost between a run and its log.
-          configs="control_echo control_wineserver plain align4k_noplist with_plist dyld_trace with_dllpath with_prefix help resigned"
+          configs="control_echo control_wineserver plain align16k align4k defaultflags with_plist dyld_trace with_dllpath with_prefix help resigned"
           status_of() {
             f="$RUNNER_TEMP/loader-diag/$1/status"
             if [ -f "$f" ] && [ "$(cat "$f")" = 0 ]; then echo yes; else echo no; fi
