@@ -486,6 +486,16 @@ jobs:
             return $?
           }
 
+          # Whether the failure that follows is Wine's answer or this machine's is a
+          # question about the operating system, so it is asked of the operating
+          # system. /usr/bin/clang, because the clang first on PATH is llvm-mingw's.
+          echo "=== what this machine lets a running process reserve ===" | tee -a "$out"
+          if /usr/bin/clang "$GITHUB_WORKSPACE/tests/wine/reserve_probe.c" -o "$RUNNER_TEMP/reserve_probe" >> "$out" 2>&1; then
+            "$RUNNER_TEMP/reserve_probe" | tee -a "$out"
+          else
+            echo "the reservation probe did not compile, see above" | tee -a "$out"
+          fi
+
           set +e
           run_limited 900 "$out" "./$WINE_LOADER" "$RUNNER_TEMP/load_d3d11.exe"
           rc=$?
