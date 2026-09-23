@@ -305,19 +305,37 @@ jobs:
           # the no_huge path). The same base for the same reason, from Wine's own
           # flags for the platform where it already had to solve this, and the
           # layout is printed afterwards so the base is read rather than assumed.
-          sed -i '' -e 's|^\(WINELOADER_LDFLAGS *=.*\)$|\1 -Wl,-image_base,0x200000000|' Makefile
-          if ! grep -q 'image_base' Makefile; then
-            echo "::error title=the image base was not set::WINELOADER_LDFLAGS is not in the generated Makefile in the form this expects, so the loader would link at the default base and Wine's allocations would collide with it."
-            grep -n 'LDFLAGS' Makefile | head -10 || true
-            exit 1
-          fi
-          echo "--- the loader link flags now: $(grep -m1 'WINELOADER_LDFLAGS' Makefile | cut -c1-120)"
+          # Two ways in, because the first attempt used a variable name that is not
+          # in the generated top-level Makefile and the relink quietly kept the
+          # default base -- the layout line below is what says whether this worked.
+          # The link flag can be passed to make directly, and the variable can be
+          # edited wherever it actually lives.
+          base_note=""
+          for mk in Makefile loader/Makefile; do
+            if [ -f "$mk" ] && grep -q '^WINELOADER_LDFLAGS' "$mk"; then
+              sed -i '' -e 's|^WINELOADER_LDFLAGS *=.*$|& -Wl,-image_base,0x200000000|' "$mk"
+              base_note="$base_note $mk:$(grep -m1 '^WINELOADER_LDFLAGS' "$mk" | cut -c1-80)"
+            fi
+          done
+          echo "--- WINELOADER_LDFLAGS where it was found:${base_note:- not found in Makefile or loader/Makefile}"
 
           rm -f loader/wine
-          make -C loader -j"$ncpu" > loader-noflags.log 2>&1 || tail -10 loader-noflags.log
+          make -C loader -j"$ncpu" LDFLAGS="-Wl,-image_base,0x200000000" > loader-base.log 2>&1 || {
+            tail -10 loader-base.log
+          }
+
           noflags_layout="$(layout_of loader/wine)"
           noflags_hash="$(shasum -a 256 loader/wine | cut -c1-12)"
-          echo "--- no flags: $noflags_layout sha256=$noflags_hash"
+          echo "--- no low-address flags, image base 0x200000000: $noflags_layout sha256=$noflags_hash"
+          # The whole point of the flag is where the image sits: Wine allocates from
+          # 0x100000000 and this loader sat exactly there. If the base did not move,
+          # nothing was achieved and the next run repeats the same failure with a
+          # different explanation.
+          if ! printf '%s' "$noflags_layout" | grep -q 'text=0x0000000200000000'; then
+            echo "::error title=the image base did not move::the loader is not at 0x200000000, so it still sits on the address Wine allocates from."
+            make -C loader -n 2>/dev/null | grep -m1 -o '\-o loader/wine' || true
+            exit 1
+          fi
           if [ "$noflags_hash" = "$new_hash" ]; then
             echo "::error title=removing the flags changed nothing::the flags are not in this link line, so the layout cannot be changed from here and this is not a test."
           fi
