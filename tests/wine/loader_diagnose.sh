@@ -199,77 +199,31 @@ log show --last 4m --style compact 2>/dev/null \
   | grep -iE 'wine|amfi|taskgated|code signature|not valid|killed' \
   | head -20 || echo "nothing usable from log show"
 
-echo "== 0a. control: a system binary through the same harness =="
+echo "== 1. a system binary, so a harness that loses output is ruled out =="
 ( unset WINEDLLPATH; unset WINEPREFIX; run_case control_echo 10 /bin/echo wine-control )
 
-echo "== 0b. control: another Wine binary through the same harness =="
+echo "== 2. another Wine binary from this same build, which is known to work =="
 ( unset WINEDLLPATH; unset WINEPREFIX; run_case control_wineserver 10 ./server/wineserver --version )
 
-echo "== 1. plain, the way the earlier step ran it =="
-( unset WINEDLLPATH; unset WINEPREFIX; unset DYLD_PRINT_INITIALIZERS; unset DYLD_PRINT_LIBRARIES; run_case plain 30 "./$loader" --version )
+echo "== 3. the loader, relinked for a 16KB page machine =="
+( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" run_case plain 30 "./$loader" --version )
 
-echo "== 2. with dyld tracing, to see whether the dynamic loader reaches Wine at all =="
-( unset WINEDLLPATH; unset WINEPREFIX; WINEDEBUG=-all DYLD_PRINT_INITIALIZERS=1 DYLD_PRINT_LIBRARIES=1 run_case dyld_trace 30 "./$loader" --version )
-
-echo "== 3. with WINEDLLPATH naming this build tree's modules =="
-( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" run_case with_dllpath 30 "./$loader" --version )
-
-echo "== 4. with a prefix that already exists =="
-( mkdir -p "$out/prefix"; WINEDEBUG=-all WINEDLLPATH="$dllpath" WINEPREFIX="$out/prefix" run_case with_prefix 30 "./$loader" --version )
-
-echo "== 4b. the same build with the embedded Info.plist retained =="
-( unset WINEPREFIX; WINEDEBUG=-all run_case with_plist 30 ./loader/wine-with-plist --version )
-
-echo "== 4c. 4KB alignment, rebuilt from scratch and kept apart =="
-( unset WINEPREFIX; WINEDEBUG=-all run_case align4k 30 ./loader/wine-align4k --version )
-
-echo "== 4d. 16KB alignment, the page size this machine actually has =="
-( unset WINEPREFIX; WINEDEBUG=-all run_case align16k 30 ./loader/wine-align16k --version )
-
-echo "== 4e. the linker's default flags, rebuilt from scratch =="
-( unset WINEPREFIX; WINEDEBUG=-all run_case defaultflags 30 ./loader/wine-default --version )
-
-echo "== 5. --help, in case only the argument path is at fault =="
+echo "== 4. the same loader with --help =="
 ( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" run_case help 30 "./$loader" --help )
-
-echo "== 6. the same binary after an ad-hoc re-sign =="
-( cp -p "$loader" "$out/wine-resigned" 2>/dev/null || cp "$loader" "$out/wine-resigned"
-  codesign --force --sign - "$out/wine-resigned" 2>&1 | head -3
-  unset WINEPREFIX; WINEDEBUG=-all run_case resigned 30 "$out/wine-resigned" --version )
 
 echo
 echo "== statuses =="
-ran=""
-for case_dir in "$out"/control_echo "$out"/control_wineserver "$out"/plain "$out"/with_plist "$out"/align4k "$out"/align16k "$out"/defaultflags "$out"/resigned "$out"/dyld_trace "$out"/with_dllpath "$out"/with_prefix "$out"/help; do
+for case_dir in "$out"/control_echo "$out"/control_wineserver "$out"/plain "$out"/help; do
   [ -d "$case_dir" ] || continue
-  label=$(basename "$case_dir")
-  status=$(cat "$case_dir/status" 2>/dev/null || echo "?")
-  bytes=$(wc -c < "$case_dir/stdout" 2>/dev/null | tr -d ' ')
-  printf '%-13s status=%-5s stdout=%s bytes  %s\n' "$label" "$status" "${bytes:-0}" "$(cat "$case_dir/state" 2>/dev/null)"
-  if [ "$status" = "0" ] && [ "${bytes:-0}" -gt 0 ]; then ran="$ran $label"; fi
+  printf '%-20s status=%-5s %s\n' "$(basename "$case_dir")" \
+    "$(cat "$case_dir/status" 2>/dev/null || echo '?')" \
+    "$(cat "$case_dir/state" 2>/dev/null)"
 done
 
-# The A/B, stated as the conclusion it is or is not.
-with_plist_status=$(cat "$out/with_plist/status" 2>/dev/null || echo "?")
-plain_status=$(cat "$out/plain/status" 2>/dev/null || echo "?")
-# The experiment, stated as the conclusion it is or is not. plain is the loader as
-# Wine configures it: 4KB alignment on a machine whose page size is 16384.
-align4k_status=$(cat "$out/align4k/status" 2>/dev/null || echo "?")
-align16k_status=$(cat "$out/align16k/status" 2>/dev/null || echo "?")
-defaultflags_status=$(cat "$out/defaultflags/status" 2>/dev/null || echo "?")
-if [ "$plain_status" != "0" ] && [ "$align16k_status" = "0" ]; then
-  echo "attribution: the loader runs when linked with -segalign 0x4000 -pagezero_size 0x4000 and dies with 0x1000, so the 4KB alignment on a 16KB page machine is the cause and the fix is the link flag" | tee "$out/attribution.txt"
-elif [ "$plain_status" != "0" ] && [ "$defaultflags_status" = "0" ]; then
-  echo "attribution: the loader runs with the linker's default flags and dies with the configured ones, so the configured link flags are the cause" | tee "$out/attribution.txt"
-elif [ "$plain_status" != "0" ] && [ "$align4k_status" != "0" ] && [ "$align16k_status" != "0" ] && [ "$defaultflags_status" != "0" ]; then
-  echo "attribution: every alignment dies, including the default one, so the layout is not the cause either and the loader needs a different explanation than a link flag" | tee "$out/attribution.txt"
-else
-  echo "attribution: inconclusive; plain=$plain_status align4k=$align4k_status align16k=$align16k_status default=$defaultflags_status" | tee "$out/attribution.txt"
-fi
-
-if [ -n "$ran" ]; then
-  echo "verdict: the loader returned with output in:$ran" | tee "$out/verdict.txt"
+# One verdict, from the loader itself, and it is about output that was produced.
+if [ "$(cat "$out/plain/status" 2>/dev/null)" = "0" ]; then
+  echo "verdict: the loader returned with status 0 and printed: $(cat "$out/plain/stdout" 2>/dev/null | head -1)" | tee "$out/verdict.txt"
   exit 0
 fi
-echo "verdict: the loader produced no output and did not return in any configuration" | tee "$out/verdict.txt"
+echo "verdict: the loader still does not run; see plain/log.txt" | tee "$out/verdict.txt"
 exit 1

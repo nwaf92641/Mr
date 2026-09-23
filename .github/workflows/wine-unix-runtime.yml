@@ -155,104 +155,69 @@ jobs:
                -o -name '*.dylib' \) \
             2>/dev/null | sort | tee "$RUNNER_TEMP/wine-unix-files.txt"
 
-          # The loader is killed at exec with SIGKILL -- "Killed: 9" -- inside the
-          # first second, while every other binary in this tree runs: the modules
-          # are fine, wineserver prints its version, /bin/echo works through the
-          # same harness. Its signature verifies (adhoc, linker-signed), and
-          # codesign reports one thing about it that it reports about nothing else:
-          # "Info.plist=not bound", from the bundle plist Wine embeds in __TEXT with
+          # The loader is linked for a 4KB page machine and this one is 16KB:
+          # __PAGEZERO vmsize 0x1000, __TEXT at 0x1000, hw.pagesize 16384. wineserver,
+          # which runs and prints its version, has a 4GB pagezero and __TEXT at
+          # 0x100000000. The kernel refuses the 4KB mapping silently and at once,
+          # which is exactly what the runs show: Killed: 9, nothing on any channel,
+          # nothing from dyld.
           #
-          #   -Wl,...,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist
+          # Two earlier attempts to change that were void, and this is the part worth
+          # remembering: `make -C loader WINELOADER_LDFLAGS=...` produced a binary
+          # with the same sha256 for four different flag sets, so the flags were not
+          # reaching the linker and "every variant dies" meant the variable had not
+          # changed rather than that it had been tested.
           #
-          # So the loader is built twice and both are tested. The only difference
-          # between the two is that link flag, which makes this an experiment rather
-          # than a repair: if the one without the plist runs and the one with it
-          # dies, the cause is identified and the fix is known.
-          echo "--- keeping the configured loader, then building one without the embedded Info.plist"
-          cp -p loader/wine loader/wine-with-plist
-          codesign --verify loader/wine-with-plist >/dev/null 2>&1 && echo "the copy still verifies" || echo "the copy does not verify: its signature did not survive the copy"
-          make -C loader WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000" clean >/dev/null 2>&1 || true
-          if make -C loader WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000" -j"$ncpu" > loader-noplist.log 2>&1; then
-            echo "loader rebuilt without the embedded plist"
-          else
-            echo "the second loader build failed; see loader-noplist.log"
-            tail -20 loader-noplist.log || true
-          fi
-          # Saved before the next build overwrites loader/wine, so that the three
-          # variants stay three distinct binaries.
-          cp -p loader/wine loader/wine-align4k
-          for candidate in loader/wine-configured loader/wine-align16k loader/wine-default; do
-            [ -e "$candidate" ] || continue
-            printf '%s: ' "$candidate"
-            if otool -s __TEXT __info_plist "$candidate" >/dev/null 2>&1 && otool -s __TEXT __info_plist "$candidate" | grep -q '[0-9a-f]'; then
-              echo "has an embedded __info_plist"
-            else
-              echo "no embedded __info_plist"
-            fi
-          done
-
-          # The layout is the candidate, and this time the rebuild is proved to have
-          # happened. The previous version rebuilt loader/wine three times and the
-          # third binary had byte-for-byte the same 4KB layout as the first, because
-          # `make` had nothing to do: nothing was deleted, so nothing was relinked,
-          # and "all the variants die" meant the variable had not been changed rather
-          # than that it had been tested.
-          #
-          # The evidence for the candidate, from the run that measured it:
-          #
-          #   hw.pagesize                                    16384
-          #   loader/wine     __PAGEZERO 0x1000  __TEXT at 0x1000     dies
-          #   wineserver      __PAGEZERO 4GB     __TEXT at 0x100000000  runs
-          #
-          # 4KB alignment on a 16KB page machine is a mapping the kernel refuses, and
-          # it refuses it silently and instantly, which is exactly what was observed:
-          # Killed: 9, zero bytes on every channel, nothing from dyld.
-          #
-          # So each variant is now built by deleting the binary first, and each is
-          # kept under its own name with its hash and its layout printed. A variant
-          # whose layout did not change is reported as such instead of being counted
-          # as a result.
-          build_loader() {
-            name="$1"
-            flags="$2"
-            rm -f loader/wine
-            if make -C loader WINELOADER_LDFLAGS="$flags" -j"$ncpu" > "loader-$name.log" 2>&1; then
-              cp -p loader/wine "loader/wine-$name"
-              echo "built loader/wine-$name with WINELOADER_LDFLAGS='$flags'"
-            else
-              echo "the $name build failed; see loader-$name.log"
-              tail -10 "loader-$name.log" || true
-            fi
-          }
-
-          echo "--- rebuilding each variant from scratch"
-          cp -p loader/wine loader/wine-configured
-          build_loader align4k "-Wl,-segalign,0x1000,-pagezero_size,0x1000"
-          build_loader align16k "-Wl,-segalign,0x4000,-pagezero_size,0x4000"
-          build_loader default ""
-          cp -p loader/wine-configured loader/wine
-
-          echo "--- the page size these binaries run on, and their segment layout"
-          echo "hw.pagesize: $(sysctl -n hw.pagesize 2>/dev/null || echo unavailable)"
-          layouts=""
-          for binary in loader/wine loader/wine-configured loader/wine-align4k loader/wine-align16k loader/wine-default loader/wine-with-plist server/wineserver; do
-            [ -e "$binary" ] || continue
-            layout=$(otool -l "$binary" 2>/dev/null | awk '
+          # So the flags are changed where they were written -- in the generated
+          # makefiles -- rather than through the variable that was assumed to carry
+          # them, and the relink has to prove itself: the layout and the hash are
+          # printed before and after, and a relink that changes neither fails this
+          # step. A rebuild that did not rebuild is not an experiment.
+          layout_of() {
+            otool -l "$1" 2>/dev/null | awk '
               /segname/ { seg = $2 }
               /vmaddr/ { vm = $2 }
-              /vmsize/ { if (seg == "__PAGEZERO") print "pagezero=" $2; if (seg == "__TEXT" && !t) { print "text_vmaddr=" vm; t = 1 } }
-            ' | tr "\n" " ")
-            hash=$(shasum -a 256 "$binary" 2>/dev/null | cut -c1-12)
-            echo "$(printf '%-28s' "$binary") $layout  sha256=$hash"
-            layouts="$layouts ; $binary $layout"
+              /vmsize/ { if (seg == "__PAGEZERO") p = $2; if (seg == "__TEXT" && !t) { tv = vm; t = 1 } }
+              END { print "pagezero=" p " text=" tv }'
+          }
+
+          echo "--- where the linker flags are written"
+          grep -rn 'pagezero_size\|segalign' Makefile Make.rules loader/Makefile 2>/dev/null | head -20 \
+            || echo "not in Makefile, Make.rules or loader/Makefile"
+
+          cp -p loader/wine loader/wine-configured
+          old_layout="$(layout_of loader/wine)"
+          old_hash="$(shasum -a 256 loader/wine | cut -c1-12)"
+
+          for f in Makefile Make.rules loader/Makefile; do
+            [ -f "$f" ] || continue
+            if grep -q 'pagezero_size,0x1000' "$f" 2>/dev/null; then
+              sed 's/-pagezero_size,0x1000/-pagezero_size,0x4000/g; s/-segalign,0x1000/-segalign,0x4000/g' "$f" > "$f.patched" \
+                && mv "$f.patched" "$f"
+              echo "patched $f: 0x1000 -> 0x4000"
+            fi
           done
 
-          # The rebuild is only an experiment if the layout actually changed.
-          if printf '%s' "$layouts" | grep 'wine-default' | grep -q 'text_vmaddr=0x0000000000001000'; then
-            if printf '%s' "$layouts" | grep 'wine-align16k' | grep -q 'text_vmaddr=0x0000000000001000'; then
-              echo "WARNING: every variant still has a 4KB __TEXT, so no variant differs from the configured build and the layout variable was NOT changed by these flags"
-            fi
+          echo "--- the flags now read"
+          grep -rn 'pagezero_size\|segalign' Makefile loader/Makefile 2>/dev/null | head -8 || echo "gone"
+
+          rm -f loader/wine
+          if make -C loader -j"$ncpu" > loader-relink.log 2>&1; then
+            echo "relinked"
+          else
+            echo "the relink failed; see loader-relink.log"
+            tail -15 loader-relink.log || true
           fi
+
+          new_layout="$(layout_of loader/wine)"
+          new_hash="$(shasum -a 256 loader/wine | cut -c1-12)"
+          echo "--- before: $old_layout sha256=$old_hash"
+          echo "--- after:  $new_layout sha256=$new_hash"
+          if [ "$old_layout" = "$new_layout" ]; then
+            echo "::error title=the relink did not change the layout::pagezero and __TEXT are unchanged after patching the flags, so the loader was not relinked with a 16KB layout and this is not a test of anything."
+            exit 1
+          fi
+          echo "the layout changed, so the new flags reached the linker"
 
           # Which name Wine gave the loader, read off the disk instead of assumed.
           # The earlier run checked loader/wine64 only, found nothing, and reported
@@ -347,6 +312,15 @@ jobs:
           : > "$out"
           export WINEPREFIX="$RUNNER_TEMP/prefix"
 
+          # Wine is run from a build tree, so it has to be told where its modules
+          # are: the unix .so files and the PE directories. Without this the load
+          # test would fail for a reason that has nothing to do with d3d11.
+          mkdir -p "$WINEPREFIX"
+          WINEDLLPATH="dlls/ntdll:dlls/win32u:$(find dlls -maxdepth 2 -type d -name '*-windows' | sort | tr '\n' ':')"
+          export WINEDLLPATH
+          echo "module path for the load test: $(printf '%s' "$WINEDLLPATH" | cut -c1-160)..."
+          ls -la dlls/d3d11/*-windows/d3d11.dll 2>/dev/null | head -3 || echo "d3d11.dll not found under dlls/d3d11/*-windows"
+
           aarch64-w64-mingw32-clang "$GITHUB_WORKSPACE/tests/wine/load_d3d11.c" \
             -o "$RUNNER_TEMP/load_d3d11.exe" >> "$out" 2>&1 || {
             echo "::error title=the load test did not compile::see wine-load-test.txt"
@@ -403,7 +377,7 @@ jobs:
           # The verdict reads the status files the diagnostic wrote, not the fact
           # that some step finished. Each configuration has its own directory, so a
           # status cannot be lost between a run and its log.
-          configs="control_echo control_wineserver plain align16k align4k defaultflags with_plist dyld_trace with_dllpath with_prefix help resigned"
+          configs="control_echo control_wineserver plain help"
           status_of() {
             f="$RUNNER_TEMP/loader-diag/$1/status"
             if [ -f "$f" ] && [ "$(cat "$f")" = 0 ]; then echo yes; else echo no; fi
