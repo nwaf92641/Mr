@@ -112,9 +112,30 @@ jobs:
           # Recorded verbatim, because the report has to contain the command that
           # was actually run rather than an equivalent one.
           echo "meson setup build --buildtype release -Dnative_llvm_path=\$LLVM_ROOT"
+          # Why the SDK's lib directory is on the link line: airconv links LLVM 15
+          # from $LLVM_ROOT, whose lib directory holds libc++, libunwind and their
+          # reexports with @rpath install names. That directory reaches further than
+          # airconv -- the linker said so itself:
+          #   ld: warning: reexported library with install name
+          #   '@rpath/libunwind.1.dylib' found at
+          #   '/Users/runner/work/_temp/llvm/lib/libunwind.1.0.dylib'
+          # and the result was measured off the binaries: d3d10core, d3d11 and dxgi
+          # all depend on /usr/lib/libc++.1.dylib while winemetal.dylib depends on
+          # @rpath/libc++.1.dylib, which resolves only if something ships a libc++
+          # beside it. The SDK stub ahead of LLVM's directory makes every host-side
+          # dylib resolve libc++ the same way, and the audit below fails if any of
+          # them goes back to an @rpath dependency.
+          sdk_lib="$(/usr/bin/xcrun --show-sdk-path)/usr/lib"
+          test -f "$sdk_lib/libc++.tbd" || {
+            echo "::error title=the SDK libc++ stub is not where this expects::looked for $sdk_lib/libc++.tbd"
+            exit 1
+          }
+          echo "system libc++ stub: $sdk_lib/libc++.tbd"
           meson setup build \
             --buildtype release \
-            -Dnative_llvm_path="$LLVM_ROOT"
+            -Dnative_llvm_path="$LLVM_ROOT" \
+            -Dc_link_args="-L$sdk_lib" \
+            -Dcpp_link_args="-L$sdk_lib"
           meson introspect build --projectinfo
 
       - name: meson compile
@@ -304,24 +325,46 @@ jobs:
             fi
           done
 
-          # libc++ is a PASS when it is the system one, reached directly or through
-          # an @rpath the loader resolves to the system one. Anything else is the
-          # vendored-libc++ situation, which has to be decided on purpose.
-          case "$libcxx" in
-            "none found"|"@rpath/libc++"*|"/usr/lib/libc++"*) libcxx_state=PASS ;;
-            *) libcxx_state=FAIL ;;
-          esac
+          # libc++ is a PASS when every dylib that needs it depends on the system
+          # path. An @rpath/libc++ dependency is not a pass and the previous rule
+          # that accepted it was wrong: the loader only finds it if something ships
+          # a libc++ next to the binary, and nothing in this project ships one. The
+          # per-dylib verdict is kept, because one averaged value hid which library
+          # was the odd one out -- three depended on /usr/lib/libc++.1.dylib and
+          # winemetal.dylib did not.
+          rpath_libcxx=""
+          libcxx_details=""
+          for dylib in $dylibs; do
+            deps_here="$(otool -L "$dylib" 2>/dev/null | tail -n +2 | awk '{print $1}' || true)"
+            here="$(printf '%s\n' "$deps_here" | grep -E 'libc\+\+|libunwind' | sort -u | tr '\n' ' ' || true)"
+            [ -n "$here" ] || continue
+            libcxx_details="$libcxx_details $(basename "$dylib"):$here"
+            case "$here" in
+              *@rpath/libc++*|*@rpath/libunwind*) rpath_libcxx="$rpath_libcxx $(basename "$dylib")" ;;
+            esac
+          done
+          libcxx_state=PASS
+          if [ -n "$rpath_libcxx" ]; then
+            libcxx_state=FAIL
+          fi
+          row "libc++ resolved from the system" "$libcxx_state" "${libcxx_details:-no dylib depends on libc++}"
+          row "No @rpath libc++ or libunwind" \
+              "$([ -z "$rpath_libcxx" ] && echo PASS || echo FAIL)" \
+              "${rpath_libcxx:-no dylib asks the loader to find one beside it}"
           row "DXMT architecture arm64" \
               "$([ "$non_arm64" -eq 0 ] && echo PASS || echo FAIL)" \
               "$count dylibs, $non_arm64 not arm64"
           row "No build-path dependency" \
               "$([ "$leaked" -eq 0 ] && echo PASS || echo FAIL)" \
               "$leaked dylibs name a path from the build machine"
-          row "libc++ dependency" "$libcxx_state" "$libcxx"
           row "LLVM dependency" "OBSERVED" "$llvm"
+          # The row used to look in src/winemetal/, and the build puts it in
+          # src/nativemetal/, so it reported FAIL for a file that was there. It is
+          # found rather than predicted, and the path it found is printed.
+          winemetal="$(find "$DXMT_SRC/build" -name 'winemetal.dylib' -print -quit 2>/dev/null)"
           row "winemetal.dylib present" \
-              "$([ -f "$DXMT_SRC/build/src/winemetal/winemetal.dylib" ] && echo PASS || echo FAIL)" \
-              "$(find "$DXMT_SRC/build" -name 'winemetal.dylib' -print -quit)"
+              "$([ -n "$winemetal" ] && echo PASS || echo FAIL)" \
+              "${winemetal:-no winemetal.dylib anywhere under the build directory}"
           row "Real Apple Silicon GPU" "REQUIRES HARDWARE" "nothing here executed a GPU operation"
 
           {
