@@ -305,23 +305,31 @@ jobs:
           # the no_huge path). The same base for the same reason, from Wine's own
           # flags for the platform where it already had to solve this, and the
           # layout is printed afterwards so the base is read rather than assumed.
-          # Two ways in, because the first attempt used a variable name that is not
-          # in the generated top-level Makefile and the relink quietly kept the
-          # default base -- the layout line below is what says whether this worked.
-          # The link flag can be passed to make directly, and the variable can be
-          # edited wherever it actually lives.
-          base_note=""
+          # The line is rewritten, not appended to. Two earlier attempts are the
+          # reason: the first edited a variable name that is not in the generated
+          # top-level Makefile and quietly changed nothing, and the second appended to
+          # a line that the substring removal above had already reduced to "-Wl", so
+          # the linker was handed "gcc -Wl -Wl,-image_base,..." and the build failed.
+          # One assignment, one flag, and the line is printed so what was linked is
+          # what gets read.
+          base_set=no
           for mk in Makefile loader/Makefile; do
-            if [ -f "$mk" ] && grep -q '^WINELOADER_LDFLAGS' "$mk"; then
-              sed -i '' -e 's|^WINELOADER_LDFLAGS *=.*$|& -Wl,-image_base,0x200000000|' "$mk"
-              base_note="$base_note $mk:$(grep -m1 '^WINELOADER_LDFLAGS' "$mk" | cut -c1-80)"
+            [ -f "$mk" ] || continue
+            if grep -q '^WINELOADER_LDFLAGS' "$mk"; then
+              sed -i '' -e 's|^WINELOADER_LDFLAGS *=.*$|WINELOADER_LDFLAGS = -Wl,-image_base,0x200000000|' "$mk"
+              echo "--- $mk: $(grep -m1 '^WINELOADER_LDFLAGS' "$mk")"
+              base_set=yes
             fi
           done
-          echo "--- WINELOADER_LDFLAGS where it was found:${base_note:- not found in Makefile or loader/Makefile}"
+          if [ "$base_set" = no ]; then
+            echo "::error title=WINELOADER_LDFLAGS is nowhere::neither Makefile nor loader/Makefile defines it, so the image base cannot be set from here and the loader would sit on the address Wine allocates from."
+            exit 1
+          fi
 
           rm -f loader/wine
-          make -C loader -j"$ncpu" LDFLAGS="-Wl,-image_base,0x200000000" > loader-base.log 2>&1 || {
+          make -C loader -j"$ncpu" > loader-base.log 2>&1 || {
             tail -10 loader-base.log
+            exit 1
           }
 
           noflags_layout="$(layout_of loader/wine)"
