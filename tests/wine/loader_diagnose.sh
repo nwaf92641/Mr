@@ -220,6 +220,9 @@ echo "== 4. with a prefix that already exists =="
 echo "== 4b. the same build with the embedded Info.plist retained =="
 ( unset WINEPREFIX; WINEDEBUG=-all run_case with_plist 30 ./loader/wine-with-plist --version )
 
+echo "== 4c. the 4KB alignment without the plist, isolated =="
+( unset WINEPREFIX; WINEDEBUG=-all run_case align4k_noplist 30 ./loader/wine-align4k --version )
+
 echo "== 5. --help, in case only the argument path is at fault =="
 ( unset WINEPREFIX; WINEDEBUG=-all WINEDLLPATH="$dllpath" run_case help 30 "./$loader" --help )
 
@@ -231,7 +234,7 @@ echo "== 6. the same binary after an ad-hoc re-sign =="
 echo
 echo "== statuses =="
 ran=""
-for case_dir in "$out"/control_echo "$out"/control_wineserver "$out"/plain "$out"/with_plist "$out"/resigned "$out"/dyld_trace "$out"/with_dllpath "$out"/with_prefix "$out"/help; do
+for case_dir in "$out"/control_echo "$out"/control_wineserver "$out"/plain "$out"/with_plist "$out"/align4k_noplist "$out"/resigned "$out"/dyld_trace "$out"/with_dllpath "$out"/with_prefix "$out"/help; do
   [ -d "$case_dir" ] || continue
   label=$(basename "$case_dir")
   status=$(cat "$case_dir/status" 2>/dev/null || echo "?")
@@ -243,6 +246,16 @@ done
 # The A/B, stated as the conclusion it is or is not.
 with_plist_status=$(cat "$out/with_plist/status" 2>/dev/null || echo "?")
 plain_status=$(cat "$out/plain/status" 2>/dev/null || echo "?")
+# plain is now the loader built with the linker's default flags, and the other two
+# are the same source linked the way Wine configures it. That is the experiment.
+align4k_status=$(cat "$out/align4k_noplist/status" 2>/dev/null || echo "?")
+if [ "$plain_status" = "0" ] && { [ "$align4k_status" != "0" ] || [ "$with_plist_status" != "0" ]; }; then
+  echo "attribution: the loader runs with the linker's default flags and dies with -segalign 0x1000 -pagezero_size 0x1000, so the 4KB segment alignment on a 16KB page machine is the cause" | tee "$out/attribution.txt"
+elif [ "$plain_status" != "0" ] && [ "$align4k_status" != "0" ]; then
+  echo "attribution: every variant dies, so neither the embedded plist nor the segment flags are the cause, and this loader is not executable on this machine at all" | tee "$out/attribution.txt"
+else
+  echo "attribution: inconclusive; the statuses are plain=$plain_status align4k=$align4k_status with_plist=$with_plist_status" | tee "$out/attribution.txt"
+fi
 if [ "$plain_status" = "0" ] && [ "$with_plist_status" != "0" ]; then
   echo "attribution: the loader runs without the embedded __info_plist and dies with it, so the plist is the cause" | tee "$out/attribution.txt"
 elif [ "$plain_status" != "0" ] && [ "$with_plist_status" != "0" ]; then
