@@ -219,6 +219,47 @@ jobs:
           fi
           echo "the layout changed, so the new flags reached the linker"
 
+          # Two variables are left, and they are separable. The previous attempt to
+          # test the embedded plist was void, like the alignment one: the flags come
+          # from the generated Makefile, so a link without -sectcreate never happened
+          # and "both variants die" compared a binary with itself.
+          #
+          # So the flag is removed where it is written, the relink is proved by hash,
+          # and three twenty-line programs linked the same three ways say whether
+          # these flags kill a program at all, or whether it is Wine's loader code.
+          cp -p loader/wine loader/wine-16k
+
+          echo "--- dropping the embedded plist flag from the generated Makefile"
+          if grep -q -- '-sectcreate,__TEXT,__info_plist' Makefile; then
+            sed 's|,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist||g' Makefile > Makefile.noplist \
+              && mv Makefile.noplist Makefile
+            echo "removed from Makefile"
+          else
+            echo "the flag is not in Makefile, so it is not in the link line"
+          fi
+          rm -f loader/wine
+          make -C loader -j"$ncpu" > loader-noplist-relink.log 2>&1 || tail -10 loader-noplist-relink.log
+          no_plist_layout="$(layout_of loader/wine)"
+          no_plist_hash="$(shasum -a 256 loader/wine | cut -c1-12)"
+          echo "--- no plist: $no_plist_layout sha256=$no_plist_hash"
+          if [ "$no_plist_hash" = "$new_hash" ]; then
+            echo "::error title=the no-plist relink produced the same binary::the plist flag is not in the link line either, so this variable cannot be tested this way."
+          fi
+          cp -p loader/wine loader/wine-noplist
+
+          # Do these flags kill a program, or is it Wine's loader code? Neither probe
+          # does anything but print a line, so the answer is about the link.
+          printf '#include <stdio.h>\nint main(void) { printf("linked and ran\\n"); return 0; }\n' > probe.c
+          clang -o probe_plain probe.c 2>/dev/null || echo "probe_plain did not compile"
+          clang -Wl,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist -o probe_plist probe.c 2>/dev/null || echo "probe_plist did not compile"
+          clang -Wl,-segalign,0x4000,-pagezero_size,0x4000 -o probe_align probe.c 2>/dev/null || echo "probe_align did not compile"
+          for probe in probe_plain probe_plist probe_align; do
+            if [ -x "$probe" ]; then
+              ./$probe > "$probe.out" 2>&1
+              printf '%-14s status=%-4s %s\n' "$probe" "$?" "$(head -1 "$probe.out")"
+            fi
+          done
+
           # Which name Wine gave the loader, read off the disk instead of assumed.
           # The earlier run checked loader/wine64 only, found nothing, and reported
           # success, which made "the loader is missing" look like "there was nothing
@@ -377,7 +418,7 @@ jobs:
           # The verdict reads the status files the diagnostic wrote, not the fact
           # that some step finished. Each configuration has its own directory, so a
           # status cannot be lost between a run and its log.
-          configs="control_echo control_wineserver plain help"
+          configs="control_echo control_wineserver plain noplist help"
           status_of() {
             f="$RUNNER_TEMP/loader-diag/$1/status"
             if [ -f "$f" ] && [ "$(cat "$f")" = 0 ]; then echo yes; else echo no; fi
