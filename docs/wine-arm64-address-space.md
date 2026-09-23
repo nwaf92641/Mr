@@ -45,9 +45,13 @@ at a normal PIE base before it would run.
 
 1. `user_shared_data` becomes a variable on `__APPLE__ && __aarch64__` instead of
    the constant `0x7ffe0000`.
-2. The 64-bit branch of `mmap_init()` reserves the page at Wine's own top-down
-   base, `0x7ff000000000` (`configure.ac`, `-segaddr,WINE_TOP_DOWN`), which the
-   probe measured this platform granting.
+2. `virtual_init()` reserves the page at Wine's own top-down base,
+   `0x7ff000000000` (`configure.ac`, `-segaddr,WINE_TOP_DOWN`), which the probe
+   measured this platform granting. It is done in `virtual_init()` rather than in
+   `mmap_init()` because the branch of `mmap_init()` that handles the 64-bit layout
+   is not the one every build reaches: the first version of this patch placed the
+   code there and the source carried it while Wine behaved as if it had no address
+   at all. `virtual_init()` is compiled by every build.
 
    Letting the kernel choose the address was tried first and does not work. Wine
    places `host_addr_space_limit` at `0x7ffffe000000` (`get_host_addr_space_limit`,

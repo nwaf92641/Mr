@@ -1,68 +1,48 @@
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -198,7 +198,21 @@
- static struct file_view *arm64ec_view;
- 
- ULONG_PTR user_space_wow_limit = 0;
-+/* Windows puts KUSER_SHARED_DATA at 0x7ffe0000, below the 4GB line. On x86_64
-+ * macOS Wine reserves that whole range for itself with zerofill sections inside
-+ * the loader's own image, so the address exists. macOS on Apple Silicon grants a
-+ * process no address below 4GB at all: tests/wine/reserve_probe.c reports EINVAL
-+ * for 0x1000 and ENOMEM for 0x7ffe0000 on the machine this was measured on. So
-+ * the address is a runtime value on this platform rather than a constant.
-+ * Wine's own virtual_init_user_shared_data() maps this same section wherever the
-+ * kernel chooses too, so a fixed address is not something Wine's code needs in
-+ * order to work. Windows binaries that hardcode 0x7ffe0000 are the cost of the
-+ * platform, recorded in docs/wine-arm64-address-space.md. */
-+#if defined(__APPLE__) && defined(__aarch64__)
-+struct _KUSER_SHARED_DATA *user_shared_data;
-+#else
- struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
-+#endif
- 
- /* TEB allocation blocks */
- static void *teb_block;
-@@ -752,11 +766,42 @@
- 
- #else
+@@ -3700,6 +3700,44 @@
+         for (i = 0; (*preload_info)[i].size; i++)
+             mmap_add_reserved_area( (*preload_info)[i].addr, (*preload_info)[i].size );
  
 +#if defined(__APPLE__) && defined(__aarch64__)
-+    /* The two reservations below that lie under the 4GB line cannot be made here:
-+     * macOS on Apple Silicon has no address space there, which is why the shared
-+     * user data page inside them was unmappable and the load test stopped at
-+     * "map_fixed_area out of memory for 0x7ffe0000-0x7ffe1000", c0000017.
++    /* The shared user data page is placed here, before mmap_init(), because this
++     * is the one place in this file that every architecture compiles: the branch
++     * of mmap_init() that deals with the 64-bit layout is not necessarily the one
++     * a given build reaches, and a fix that lives in the wrong branch is a fix
++     * that does nothing while looking right.
 +     *
-+     * The page is reserved at Wine's own top-down base instead. That address is
-+     * not invented here: it is the one Wine already reserves its top-down area at
-+     * on macOS (configure.ac, -segaddr,WINE_TOP_DOWN,0x7ff000000000), and
-+     * tests/wine/reserve_probe.c measured this platform granting it. Letting the
-+     * kernel choose an address instead was tried and does not work: the kernel
-+     * places it at or above host_addr_space_limit, 0x7ffffe000000, and map_view
-+     * refuses that with STATUS_CONFLICTING_ADDRESSES, c0000018, which is the
-+     * failure this revision replaces. Below the 4GB line the platform has nothing
-+     * at all, and above host_addr_space_limit Wine will not map. Wine's own
-+     * virtual_init_user_shared_data() maps this same section wherever the kernel
-+     * chooses, so a fixed address is not something Wine's code needs to work. */
++     * Why the address: Windows puts KUSER_SHARED_DATA at 0x7ffe0000, below the
++     * 4GB line. On x86_64 macOS Wine reserves that whole range for itself with
++     * zerofill sections inside the loader's own image, and
++     * loader/main.c compiles out its reservation on arm64 the same way
++     * configure.ac gives the reservation to x86_64 only. macOS on Apple Silicon
++     * has no address space below the 4GB line at all, measured by
++     * tests/wine/reserve_probe.c: 0x7ffe0000 fails with ENOMEM, 0x1000 with
++     * EINVAL, and the high area is granted. So the page comes from a reservation
++     * above the line, at Wine's own top-down base -- the address configure.ac
++     * already names on macOS, -segaddr,WINE_TOP_DOWN,0x7ff000000000 -- which is
++     * the address the probe measured this platform granting.
++     *
++     * Letting the kernel choose the address was tried and fails a step later:
++     * this platform hands out unaddressed mappings at or above
++     * host_addr_space_limit, and map_view refuses those with
++     * STATUS_CONFLICTING_ADDRESSES. The limits are printed with the address so
++     * that the next failure is read against them rather than inferred.
++     *
++     * Wine's own virtual_init_user_shared_data() maps this same section wherever
++     * the kernel chooses, so a fixed address is not something Wine's code needs
++     * in order to work. Windows binaries that hardcode 0x7ffe0000 are the cost of
++     * the platform; docs/wine-arm64-address-space.md records it. */
 +    {
 +        void *page = mmap( (void *)0x7ff000000000, host_page_size, PROT_NONE,
 +                           MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0 );
 +
-+        if (page == MAP_FAILED)
-+        {
-+            ERR( "failed to reserve the page for the shared user data\n" );
-+            exit( 1 );
-+        }
-+        user_shared_data = page;
-+        WARN( "shared user data page at %p\n", page );
++        ERR( "arm64 shared user data page: %p (host limit %p, user limit %p, as limit %p)\n",
++             page, host_addr_space_limit, user_space_limit, address_space_limit );
++        if (page != MAP_FAILED) user_shared_data = page;
 +    }
-+#else
-     if (preload_info) return;
-     /* if we don't have a preloader, try to reserve the space now */
-     reserve_area( (void *)0x000000010000, (void *)0x000068000000 );
-     reserve_area( (void *)0x00007f000000, (void *)0x00007fff0000 );
-     reserve_area( (void *)0x7ffffe000000, (void *)0x7fffffff0000 );
 +#endif
+     mmap_init( preload_info ? *preload_info : NULL );
  
- #endif
- }
+     if ((preload = getenv("WINEPRELOADRESERVE")))
