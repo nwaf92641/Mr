@@ -179,7 +179,12 @@ jobs:
           : > "$log"
           : > "$RUNNER_TEMP/wine-unix-plan.txt"
 
-          for target in dlls/ntdll dlls/win32u loader server; do
+          # nls is here because Wine's processes and the server load locale data from
+          # it, and a run without it stops at
+          #   err:environ:read_nls_file failed to load .../nls/normnfc.nls
+          #   wineserver: failed to load l_intl.nls
+          # before the program under test is reached at all.
+          for target in dlls/ntdll dlls/win32u loader server nls; do
             if [ ! -f "$target/Makefile" ]; then
               echo "$target: no generated Makefile, skipped" | tee -a "$RUNNER_TEMP/wine-unix-plan.txt"
               continue
