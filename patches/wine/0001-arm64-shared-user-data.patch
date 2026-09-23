@@ -1,0 +1,69 @@
+diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
+--- a/dlls/ntdll/unix/virtual.c
++++ b/dlls/ntdll/unix/virtual.c
+@@ -198,7 +198,22 @@
+ static struct file_view *arm64ec_view;
+ 
+ ULONG_PTR user_space_wow_limit = 0;
++/* Windows puts KUSER_SHARED_DATA at 0x7ffe0000, below the 4GB line. On x86_64
++ * macOS Wine reserves that whole range for itself with zerofill sections inside
++ * the loader's own image, so the address exists. macOS on Apple Silicon grants a
++ * process no address below 4GB at all: tests/wine/reserve_probe.c reports EINVAL
++ * for 0x1000 and ENOMEM for 0x7ffe0000 on the machine this was measured on, while
++ * the high area is granted. So the page comes from the kernel, whose placement is
++ * the only one this platform honours, and the address is a runtime value rather
++ * than a constant. Wine's own virtual_init_user_shared_data() maps this same
++ * section wherever the kernel chooses too, so a fixed address is not something
++ * Wine's code needs in order to work. Windows binaries that hardcode 0x7ffe0000
++ * are the cost of the platform, recorded in docs/wine-arm64-address-space.md. */
++#if defined(__APPLE__) && defined(__aarch64__)
++struct _KUSER_SHARED_DATA *user_shared_data;
++#else
+ struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
++#endif
+ 
+ /* TEB allocation blocks */
+ static void *teb_block;
+@@ -752,11 +767,42 @@
+ 
+ #else
+ 
++#if defined(__APPLE__) && defined(__aarch64__)
++    /* The three areas Wine reserves below are the 32-bit layout, the low 64-bit
++     * layout, and the top-down area. The first two lie below the 4GB line, where
++     * macOS on Apple Silicon has no address space to reserve, so they fail quietly
++     * here and the shared user data page inside them would be unmappable -- which
++     * is where the load test stopped:
++     *
++     *   err:virtual:map_fixed_area out of memory for 0x7ffe0000-0x7ffe1000
++     *   err:virtual:virtual_alloc_first_thread_data c0000017
++     *
++     * The page is reserved from the kernel instead, and whatever address it grants
++     * is the address Wine uses, which is the same latitude
++     * virtual_init_user_shared_data() takes. The top-down area is reserved as
++     * before: it is above the line and the kernel grants it. */
++    {
++        void *page = mmap( (void *)0x7ffe0000, host_page_size, PROT_NONE,
++                           MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0 );
++
++        if (page == MAP_FAILED)
++            page = mmap( NULL, host_page_size, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0 );
++        if (page == MAP_FAILED)
++        {
++            ERR( "failed to reserve the page for the shared user data\n" );
++            exit( 1 );
++        }
++        user_shared_data = page;
++        TRACE( "shared user data page at %p\n", page );
++    }
++    reserve_area( (void *)0x7ffffe000000, (void *)0x7fffffff0000 );
++#else
+     if (preload_info) return;
+     /* if we don't have a preloader, try to reserve the space now */
+     reserve_area( (void *)0x000000010000, (void *)0x000068000000 );
+     reserve_area( (void *)0x00007f000000, (void *)0x00007fff0000 );
+     reserve_area( (void *)0x7ffffe000000, (void *)0x7fffffff0000 );
++#endif
+ 
+ #endif
+ }

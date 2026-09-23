@@ -95,6 +95,49 @@ jobs:
           echo "checked out $(git rev-parse HEAD)"
           echo "commit=$commit" >> "$GITHUB_ENV"
 
+      # The one change to Wine this stage needs, applied where Wine is built.
+      #
+      # A patch that does not apply fails the job. A build that quietly continues
+      # unpatched would report the same failure as before and give no way to tell
+      # "the fix does not work" from "the fix is not in the tree", which is the
+      # distinction every run in this stage has had to pay for.
+      - name: Patch Wine for the arm64 address space
+        run: |
+          set -euo pipefail
+          cd "$WINE_SRC"
+          patch_file="$GITHUB_WORKSPACE/patches/wine/0001-arm64-shared-user-data.patch"
+          test -f "$patch_file" || {
+            echo "::error title=the patch file is missing::patches/wine/0001-arm64-shared-user-data.patch"
+            exit 1
+          }
+          echo "--- the line the patch is written against:"
+          grep -n 'user_shared_data = (void \*)0x7ffe0000;' dlls/ntdll/unix/virtual.c || echo "(not found, the tree may be a different revision)"
+
+          applied=no
+          for how in "git apply -p1" "git apply -3 -p1" "patch -p1 -F3"; do
+            if $how "$patch_file" >> "$RUNNER_TEMP/wine-patch.log" 2>&1; then
+              applied=yes
+              echo "applied with: $how"
+              break
+            fi
+            echo "$how did not apply" >> "$RUNNER_TEMP/wine-patch.log"
+            git checkout -- dlls/ntdll/unix/virtual.c 2>/dev/null || true
+          done
+          if [ "$applied" = no ]; then
+            echo "::error title=the Wine patch did not apply::this tree is not the revision the patch was written against, and continuing would build unpatched Wine while reporting the fix as present. See wine-patch.log."
+            cat "$RUNNER_TEMP/wine-patch.log" || true
+            exit 1
+          fi
+
+          # Applied is not the same as changed. The marker is what the build will
+          # compile; without it the source is untouched whatever the patch tool said.
+          if ! grep -q 'defined(__APPLE__) && defined(__aarch64__)' dlls/ntdll/unix/virtual.c; then
+            echo "::error title=the patch reported success and the source has no arm64 branch::nothing was changed."
+            exit 1
+          fi
+          echo "--- the source now carries:"
+          grep -n -A2 'defined(__APPLE__) && defined(__aarch64__)' dlls/ntdll/unix/virtual.c | head -24
+
       - name: configure
         run: |
           set -euo pipefail
