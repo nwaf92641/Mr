@@ -352,6 +352,22 @@ jobs:
       # resolves the entry points. It is the same question the PE workflow asked by
       # reading exports, asked the other way -- by asking Wine to load the module
       # and hand back the address.
+      # The D3D11 runtime load, with the modules it loads actually present.
+      #
+      # The previous version of this step reported success while its own output said
+      # "d3d11.dll not found". The modules were built in a different job in a
+      # different tree, and the step did not fail when the thing it was testing was
+      # absent -- which meant the table's D3D11 row was decided by a grep over a file
+      # that never mentioned d3d11. That is the false green this replaces.
+      #
+      # The set of modules to build is computed, not guessed. It starts from the
+      # modules the test names and follows their import tables with llvm-readobj,
+      # because a module loads exactly when all of its static imports resolve. The
+      # programs Wine runs to initialise a prefix are built too: without them the
+      # first run of the loader stops before the test program starts.
+      #
+      # A module that is missing fails this step. A load test that cannot find the
+      # module it loads measures nothing, and "measures nothing" is not a pass.
       - name: Build and run the D3D11 load test
         run: |
           set -euo pipefail
@@ -359,16 +375,80 @@ jobs:
           cd "$WINE_BUILD"
           out="$RUNNER_TEMP/wine-load-test.txt"
           : > "$out"
+          ncpu=$(sysctl -n hw.ncpu)
+          pe_arch=aarch64-windows
           export WINEPREFIX="$RUNNER_TEMP/prefix"
-
-          # Wine is run from a build tree, so it has to be told where its modules
-          # are: the unix .so files and the PE directories. Without this the load
-          # test would fail for a reason that has nothing to do with d3d11.
           mkdir -p "$WINEPREFIX"
+
+          echo "=== modules for the load test, and the closure of what they import ===" | tee -a "$out"
+          queue="ntdll kernel32 d3d11 dxgi d3dcompiler_47 msvcrt"
+          done_modules=""
+          failed_modules=""
+          while [ -n "$queue" ]; do
+            module=$(printf '%s' "$queue" | cut -d' ' -f1)
+            queue=$(printf '%s' "$queue" | cut -s -d' ' -f2-)
+            case " $done_modules " in
+              *" $module "*) continue ;;
+            esac
+            done_modules="$done_modules $module"
+            if [ ! -d "dlls/$module" ]; then
+              echo "no source directory dlls/$module, which is normal for an api set" | tee -a "$out"
+              continue
+            fi
+            if make -C "dlls/$module" -j"$ncpu" >> "$out" 2>&1; then
+              if [ -f "dlls/$module/$pe_arch/$module.dll" ]; then
+                echo "built dlls/$module/$pe_arch/$module.dll" | tee -a "$out"
+              else
+                echo "make succeeded and produced no $pe_arch module for $module" | tee -a "$out"
+                continue
+              fi
+            else
+              failed_modules="$failed_modules $module"
+              echo "BUILD FAILED $module" | tee -a "$out"
+              continue
+            fi
+            imports=$(llvm-readobj --coff-imports "dlls/$module/$pe_arch/$module.dll" 2>/dev/null \
+              | grep -oE 'Name: [A-Za-z0-9_.-]+\.dll' | awk '{print $2}' | sort -u || true)
+            for imported in $imports; do
+              base=$(printf '%s' "$imported" | sed 's/\.dll$//' | tr 'A-Z' 'a-z')
+              if [ -d "dlls/$base" ]; then
+                queue="$queue $base"
+              fi
+            done
+          done
+          echo "closure built:$done_modules" | tee -a "$out"
+          if [ -n "$failed_modules" ]; then
+            echo "modules whose build failed:$failed_modules" | tee -a "$out"
+          fi
+
+          # The programs Wine needs to initialise a prefix on the first run.
+          for program in wineboot services rundll32 explorer; do
+            if [ -d "programs/$program" ]; then
+              if make -C "programs/$program" -j"$ncpu" >> "$out" 2>&1; then
+                echo "built programs/$program" | tee -a "$out"
+              else
+                echo "BUILD FAILED programs/$program" | tee -a "$out"
+              fi
+            fi
+          done
+
+          # The five modules the test names have to exist, or this step fails now.
+          missing=""
+          for module in ntdll kernel32 d3d11 dxgi d3dcompiler_47; do
+            if [ ! -f "dlls/$module/$pe_arch/$module.dll" ]; then
+              missing="$missing $module"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error title=the modules the load test names are not present::$pe_arch modules missing:$missing. This step builds them and fails when it cannot, because a load test without its module is not a measurement."
+            grep -E 'BUILD FAILED|error:|Error' "$out" | head -20 || true
+            exit 1
+          fi
+          echo "all five modules the test names are present" | tee -a "$out"
+
           WINEDLLPATH="dlls/ntdll:dlls/win32u:$(find dlls -maxdepth 2 -type d -name '*-windows' | sort | tr '\n' ':')"
           export WINEDLLPATH
-          echo "module path for the load test: $(printf '%s' "$WINEDLLPATH" | cut -c1-160)..."
-          ls -la dlls/d3d11/*-windows/d3d11.dll 2>/dev/null | head -3 || echo "d3d11.dll not found under dlls/d3d11/*-windows"
+          echo "module path: $(printf '%s' "$WINEDLLPATH" | cut -c1-200)" | tee -a "$out"
 
           aarch64-w64-mingw32-clang "$GITHUB_WORKSPACE/tests/wine/load_d3d11.c" \
             -o "$RUNNER_TEMP/load_d3d11.exe" >> "$out" 2>&1 || {
@@ -378,17 +458,49 @@ jobs:
           }
           file "$RUNNER_TEMP/load_d3d11.exe" | tee -a "$out"
 
-          test -n "${WINE_LOADER:-}" && test -x "$WINE_LOADER" || {
-            echo "::error::the load test needs the loader recorded by the build step"
+          if [ -z "${WINE_LOADER:-}" ] || [ ! -x "$WINE_LOADER" ]; then
+            echo "::error title=no loader::the build step records the loader path and there is none to run the test with"
             exit 1
+          fi
+
+          # A limit that cannot turn a failure into a pass: the child is killed after
+          # it, and a killed child leaves a status that no grep will read as OK.
+          run_limited() {
+            seconds="$1"
+            log="$2"
+            shift 2
+            "$@" >> "$log" 2>&1 &
+            pid=$!
+            waited=0
+            while [ "$waited" -lt "$seconds" ] && kill -0 "$pid" 2>/dev/null; do
+              sleep 1
+              waited=$((waited + 1))
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+              echo "the load test was still running after ${seconds}s and was stopped" | tee -a "$log"
+              kill -9 "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+              return 137
+            fi
+            wait "$pid"
+            return $?
           }
 
           set +e
-          run_limited 600 "$out" "./$WINE_LOADER" "$RUNNER_TEMP/load_d3d11.exe"
+          run_limited 900 "$out" "./$WINE_LOADER" "$RUNNER_TEMP/load_d3d11.exe"
           rc=$?
           set -e
           echo "load test exit status: $rc" | tee -a "$out"
-          tail -30 "$out"
+          echo "--- what Wine said, in full" | tee -a "$out"
+          tail -40 "$out"
+
+          # The verdict is the program's own words: LOAD TEST OK is printed only when
+          # every module loaded and every entry point resolved.
+          if [ "$rc" -ne 0 ] || ! grep -q 'LOAD TEST OK' "$out"; then
+            echo "::error title=the D3D11 runtime load did not pass::exit status $rc. Wine's own message above is more useful than any summary this step could write."
+            exit 1
+          fi
+          echo "the D3D11 runtime load passed: every module loaded and every entry point resolved"
 
       # The verdict, and the only place this job decides anything.
       #
