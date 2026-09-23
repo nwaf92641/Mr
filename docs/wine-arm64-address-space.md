@@ -45,11 +45,16 @@ at a normal PIE base before it would run.
 
 1. `user_shared_data` becomes a variable on `__APPLE__ && __aarch64__` instead of
    the constant `0x7ffe0000`.
-2. The 64-bit branch of `mmap_init()` tries `0x7ffe0000` first, and when the
-   kernel refuses it takes the page from the kernel with an unaddressed `mmap`.
-   The address is chosen by the platform rather than invented here, which is the
-   same latitude `virtual_init_user_shared_data()` already takes when it maps the
-   shared section at an address it does not choose.
+2. The 64-bit branch of `mmap_init()` reserves the page at Wine's own top-down
+   base, `0x7ff000000000` (`configure.ac`, `-segaddr,WINE_TOP_DOWN`), which the
+   probe measured this platform granting.
+
+   Letting the kernel choose the address was tried first and does not work. Wine
+   places `host_addr_space_limit` at `0x7ffffe000000` (`get_host_addr_space_limit`,
+   `MACH_VM_MAX_ADDRESS_RAW`), and this platform hands out unaddressed mappings at
+   or above it, so `map_view` refuses with `STATUS_CONFLICTING_ADDRESSES`,
+   `c0000018`. That is what the second run of the patched Wine reported, and it is
+   why the address is one Wine already uses rather than one the kernel hands over.
 3. The two reservations below 4GB are not attempted on arm64, because they cannot
    succeed. The top-down reservation above the line is kept.
 
