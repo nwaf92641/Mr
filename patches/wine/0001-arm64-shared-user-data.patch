@@ -1,7 +1,7 @@
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -615,7 +615,34 @@
+@@ -615,7 +615,38 @@
      }
      else
      {
@@ -12,12 +12,14 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 +         * stops at the first mapping failure that is not EEXIST:
 +         *   err:virtual:try_map_free_area mmap() error Cannot allocate memory,
 +         *   range 0x100000000-0x100030000, unix_prot 0.
-+         * The range it stopped at is the main executable's own image, which Wine has
++         * The range it stopped at is where this loader's own image is, which Wine has
 +         * no record of, and the kernel answers a fixed mapping over it with
 +         * KERN_PROTECTION_FAILURE rather than KERN_NO_SPACE -- so Wine reports ENOMEM
 +         * and gives up, where EEXIST would have moved it on to the next free area.
 +         * Whether the range is mapped is asked with mach_vm_region, the same question
-+         * reserve_area() asks a few hundred lines above. */
++         * reserve_area() asks a few hundred lines above. The values are printed
++         * because the first version of this change was measured to make no difference,
++         * and a line saying which answer came back is worth more than another guess. */
 +        {
 +            mach_vm_address_t query = (mach_vm_address_t)start;
 +            mach_vm_address_t target = (mach_vm_address_t)start + size;
@@ -33,11 +35,13 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 +                errno = EEXIST;
 +            else
 +                errno = (ret == KERN_NO_SPACE ? EEXIST : ENOMEM);
++            ERR( "arm64 fixed map: mach ret %d, probe %d at %p, range %p-%p, errno %d\n",
++                 ret, probe, (void *)query, start, (char *)start + size, errno );
 +        }
          ptr = MAP_FAILED;
      }
  #else
-@@ -3700,6 +3727,31 @@
+@@ -3700,6 +3731,31 @@
          for (i = 0; (*preload_info)[i].size; i++)
              mmap_add_reserved_area( (*preload_info)[i].addr, (*preload_info)[i].size );
  
