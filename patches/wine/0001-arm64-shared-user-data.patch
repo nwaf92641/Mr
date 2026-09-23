@@ -6,7 +6,7 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
      else
      {
 -        errno = (ret == KERN_NO_SPACE ? EEXIST : ENOMEM);
-+        /* mach_vm_map with VM_FLAGS_FIXED does not distinguish "this range is taken"
++        /* mach_vm_map with VM_FLAGS_FIXED does not distinguish a range that is taken
 +         * from other failures here, and the difference is what the caller does with
 +         * it. try_map_free_area() walks the free areas of Wine's own bookkeeping and
 +         * stops at the first mapping failure that is not EEXIST:
@@ -15,7 +15,7 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 +         * The range it stopped at is the main executable's own image, which Wine has
 +         * no record of, and the kernel answers a fixed mapping over it with
 +         * KERN_PROTECTION_FAILURE rather than KERN_NO_SPACE -- so Wine reports ENOMEM
-+         * and gives up, where EEXIST would have moved it to the next free area.
++         * and gives up, where EEXIST would have moved it on to the next free area.
 +         * Whether the range is mapped is asked with mach_vm_region, the same question
 +         * reserve_area() asks a few hundred lines above. */
 +        {
@@ -37,7 +37,7 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
          ptr = MAP_FAILED;
      }
  #else
-@@ -3700,6 +3727,30 @@
+@@ -3700,6 +3727,31 @@
          for (i = 0; (*preload_info)[i].size; i++)
              mmap_add_reserved_area( (*preload_info)[i].addr, (*preload_info)[i].size );
  
@@ -65,6 +65,7 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 +    user_shared_data = (void *)0x7ff000000000;
 +    ERR( "arm64 shared user data page: %p (host limit %p, user limit %p, as limit %p)\n",
 +         user_shared_data, host_addr_space_limit, user_space_limit, address_space_limit );
++#endif
      mmap_init( preload_info ? *preload_info : NULL );
  
      if ((preload = getenv("WINEPRELOADRESERVE")))
