@@ -293,57 +293,33 @@ jobs:
           after_refs=$(grep -c 'pagezero_size\|segalign\|__info_plist' Makefile 2>/dev/null || echo 0)
           echo "references in the link line: $before_refs before, $after_refs after"
 
-          # Where the loader sits matters to Wine's own allocator, and the next
-          # failure says so: Wine tried to map a 1MB area at 0x100000000 and the
-          # system refused --
-          #   err:virtual:try_map_free_area mmap() error Cannot allocate memory,
-          #   range 0x100000000-0x100100000
-          # This loader links at the default PIE base, which is that address, so
-          # Wine's first allocation lands inside its own loader. Wine on x86_64
-          # macOS does not have this problem because configure.ac puts the loader
-          # at 0x200000000 there (-image_base,0x200000000, in WINELOADER_LDFLAGS for
-          # the no_huge path). The same base for the same reason, from Wine's own
-          # flags for the platform where it already had to solve this, and the
-          # layout is printed afterwards so the base is read rather than assumed.
-          # The line is rewritten, not appended to. Two earlier attempts are the
-          # reason: the first edited a variable name that is not in the generated
-          # top-level Makefile and quietly changed nothing, and the second appended to
-          # a line that the substring removal above had already reduced to "-Wl", so
-          # the linker was handed "gcc -Wl -Wl,-image_base,..." and the build failed.
-          # One assignment, one flag, and the line is printed so what was linked is
-          # what gets read.
-          base_set=no
+          # The low-address flags are removed by substring above, which leaves the
+          # "-Wl" prefix on its own; appending to it produced a link command the
+          # compiler refused. The line is rewritten as an empty assignment instead.
+          #
+          # Moving the loader to 0x200000000, the base Wine uses for it on x86_64,
+          # was tried here and dropped: the flag never reached the link line from this
+          # Makefile and the run failed its own assertion with the loader still at
+          # 0x100000000. Wine is told which regions are already mapped instead, in
+          # virtual_init(), which is the same list reserve_area() writes to. The
+          # layout is printed so where the loader sits is read rather than assumed.
           for mk in Makefile loader/Makefile; do
             [ -f "$mk" ] || continue
             if grep -q '^WINELOADER_LDFLAGS' "$mk"; then
-              sed -i '' -e 's|^WINELOADER_LDFLAGS *=.*$|WINELOADER_LDFLAGS = -Wl,-image_base,0x200000000|' "$mk"
+              sed -i '' -e 's|^WINELOADER_LDFLAGS *=.*$|WINELOADER_LDFLAGS =|' "$mk"
               echo "--- $mk: $(grep -m1 '^WINELOADER_LDFLAGS' "$mk")"
-              base_set=yes
             fi
           done
-          if [ "$base_set" = no ]; then
-            echo "::error title=WINELOADER_LDFLAGS is nowhere::neither Makefile nor loader/Makefile defines it, so the image base cannot be set from here and the loader would sit on the address Wine allocates from."
-            exit 1
-          fi
 
           rm -f loader/wine
-          make -C loader -j"$ncpu" > loader-base.log 2>&1 || {
-            tail -10 loader-base.log
+          make -C loader -j"$ncpu" > loader-relink.log 2>&1 || {
+            tail -10 loader-relink.log
             exit 1
           }
 
           noflags_layout="$(layout_of loader/wine)"
           noflags_hash="$(shasum -a 256 loader/wine | cut -c1-12)"
-          echo "--- no low-address flags, image base 0x200000000: $noflags_layout sha256=$noflags_hash"
-          # The whole point of the flag is where the image sits: Wine allocates from
-          # 0x100000000 and this loader sat exactly there. If the base did not move,
-          # nothing was achieved and the next run repeats the same failure with a
-          # different explanation.
-          if ! printf '%s' "$noflags_layout" | grep -q 'text=0x0000000200000000'; then
-            echo "::error title=the image base did not move::the loader is not at 0x200000000, so it still sits on the address Wine allocates from."
-            make -C loader -n 2>/dev/null | grep -m1 -o '\-o loader/wine' || true
-            exit 1
-          fi
+          echo "--- no low-address flags: $noflags_layout sha256=$noflags_hash"
           if [ "$noflags_hash" = "$new_hash" ]; then
             echo "::error title=removing the flags changed nothing::the flags are not in this link line, so the layout cannot be changed from here and this is not a test."
           fi

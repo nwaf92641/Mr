@@ -1,7 +1,7 @@
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -3700,6 +3700,32 @@
+@@ -3700,7 +3700,75 @@
          for (i = 0; (*preload_info)[i].size; i++)
              mmap_add_reserved_area( (*preload_info)[i].addr, (*preload_info)[i].size );
  
@@ -10,27 +10,70 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 +     * mmap_init() because this is the one place every build of this file compiles.
 +     *
 +     * Windows puts KUSER_SHARED_DATA at 0x7ffe0000, below the 4GB line. On x86_64
-+     * macOS Wine reserves that whole range for itself with zerofill sections in
-+     * the loader's own image; configure.ac gives that reservation to x86_64 only
-+     * and loader/main.c compiles its own out on arm64, so on Apple Silicon Wine
-+     * reserves nothing and asks for an address macOS does not have. Measured by
++     * macOS Wine reserves that whole range for itself with zerofill sections in the
++     * loader's own image; configure.ac gives that reservation to x86_64 only and
++     * loader/main.c compiles its own out on arm64, so on Apple Silicon Wine reserves
++     * nothing and asks for an address macOS does not have. Measured by
 +     * tests/wine/reserve_probe.c: 0x7ffe0000 fails with ENOMEM, the low 8GB with
 +     * EINVAL, the high area is granted.
 +     *
 +     * So the page is moved to Wine's own top-down base, the address configure.ac
-+     * already names on macOS (-segaddr,WINE_TOP_DOWN,0x7ff000000000) and the one
-+     * the probe measured this platform granting.
++     * already names on macOS (-segaddr,WINE_TOP_DOWN,0x7ff000000000) and the one the
++     * probe measured this platform granting.
 +     *
-+     * It is deliberately not mapped here. The first attempt reserved it with
-+     * mmap, and map_fixed_area() then refused it with STATUS_CONFLICTING_ADDRESSES
-+     * -- not from the limit checks, which the line below shows passing, but from
-+     * anon_mmap_tryfixed() finding the range already taken and reporting EEXIST.
-+     * The address has to be free for Wine to map its page into it, and it is left
-+     * free. */
++     * It is deliberately not mapped here. The first attempt reserved it with mmap,
++     * and map_fixed_area() then refused it with STATUS_CONFLICTING_ADDRESSES -- not
++     * from the limit checks, which the line below shows passing, but from
++     * anon_mmap_tryfixed() finding the range already taken and reporting EEXIST. The
++     * address has to be free for Wine to map its page into it, so it is left free. */
 +    user_shared_data = (void *)0x7ff000000000;
 +    ERR( "arm64 shared user data page: %p (host limit %p, user limit %p, as limit %p)\n",
 +         user_shared_data, host_addr_space_limit, user_space_limit, address_space_limit );
 +#endif
      mmap_init( preload_info ? *preload_info : NULL );
++
++#if defined(__APPLE__) && defined(__aarch64__)
++    /* Wine's reserved_areas list holds the holes this process reserved, and every
++     * region that is already mapped is missing from it, so the allocator treats
++     * mapped addresses as free. reserve_area() above shows the shape of the
++     * problem: on macOS it walks the process with mach_vm_region and registers the
++     * holes, never the mapped regions.
++     *
++     * On this platform that has a concrete consequence. macOS has nothing below the
++     * 4GB line, so the first area Wine hands out is 0x100000000, which is where this
++     * loader's own image is mapped, and the kernel refuses to map over the main
++     * executable's text:
++     *   err:virtual:try_map_free_area mmap() error Cannot allocate memory,
++     *   range 0x100000000-0x100030000
++     *   err:virtual:map_image_into_view failed to set 60000020 protection on
++     *   load_d3d11.exe section .text, noexec filesystem?
++     * On x86_64 macOS Wine never sees this because the preloader reserves the low
++     * range and registers it as reserved. There is no preloader here, so each mapped
++     * region is registered, which is the same list reserve_area() writes to.
++     *
++     * Nothing below 0x100000000 is skipped: that is where Wine's own small
++     * reservations would go, and those are holes rather than mapped regions, so they
++     * are still seen as free by the allocator. */
++    {
++        mach_vm_address_t addr = 0x100000000;
++        mach_vm_address_t limit = (mach_vm_address_t)address_space_limit;
++
++        while (addr < limit)
++        {
++            mach_vm_size_t size = 0;
++            vm_region_basic_info_data_64_t info;
++            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
++            mach_port_t object = MACH_PORT_NULL;
++
++            if (mach_vm_region( mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64,
++                                (vm_region_info_t)&info, &count, &object ) != KERN_SUCCESS)
++                break;
++            if (size && !(info.protection & VM_PROT_NONE))
++                mmap_add_reserved_area( (void *)addr, (SIZE_T)size );
++            addr += size;
++        }
++    }
++#endif
  
      if ((preload = getenv("WINEPRELOADRESERVE")))
+     {
