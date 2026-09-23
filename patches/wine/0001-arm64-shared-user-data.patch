@@ -1,47 +1,35 @@
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -3700,6 +3700,44 @@
+@@ -3700,6 +3700,32 @@
          for (i = 0; (*preload_info)[i].size; i++)
              mmap_add_reserved_area( (*preload_info)[i].addr, (*preload_info)[i].size );
  
 +#if defined(__APPLE__) && defined(__aarch64__)
-+    /* The shared user data page is placed here, before mmap_init(), because this
-+     * is the one place in this file that every architecture compiles: the branch
-+     * of mmap_init() that deals with the 64-bit layout is not necessarily the one
-+     * a given build reaches, and a fix that lives in the wrong branch is a fix
-+     * that does nothing while looking right.
++    /* Where the Windows shared user data page lives on this platform, set before
++     * mmap_init() because this is the one place every build of this file compiles.
 +     *
-+     * Why the address: Windows puts KUSER_SHARED_DATA at 0x7ffe0000, below the
-+     * 4GB line. On x86_64 macOS Wine reserves that whole range for itself with
-+     * zerofill sections inside the loader's own image, and
-+     * loader/main.c compiles out its reservation on arm64 the same way
-+     * configure.ac gives the reservation to x86_64 only. macOS on Apple Silicon
-+     * has no address space below the 4GB line at all, measured by
-+     * tests/wine/reserve_probe.c: 0x7ffe0000 fails with ENOMEM, 0x1000 with
-+     * EINVAL, and the high area is granted. So the page comes from a reservation
-+     * above the line, at Wine's own top-down base -- the address configure.ac
-+     * already names on macOS, -segaddr,WINE_TOP_DOWN,0x7ff000000000 -- which is
-+     * the address the probe measured this platform granting.
++     * Windows puts KUSER_SHARED_DATA at 0x7ffe0000, below the 4GB line. On x86_64
++     * macOS Wine reserves that whole range for itself with zerofill sections in
++     * the loader's own image; configure.ac gives that reservation to x86_64 only
++     * and loader/main.c compiles its own out on arm64, so on Apple Silicon Wine
++     * reserves nothing and asks for an address macOS does not have. Measured by
++     * tests/wine/reserve_probe.c: 0x7ffe0000 fails with ENOMEM, the low 8GB with
++     * EINVAL, the high area is granted.
 +     *
-+     * Letting the kernel choose the address was tried and fails a step later:
-+     * this platform hands out unaddressed mappings at or above
-+     * host_addr_space_limit, and map_view refuses those with
-+     * STATUS_CONFLICTING_ADDRESSES. The limits are printed with the address so
-+     * that the next failure is read against them rather than inferred.
++     * So the page is moved to Wine's own top-down base, the address configure.ac
++     * already names on macOS (-segaddr,WINE_TOP_DOWN,0x7ff000000000) and the one
++     * the probe measured this platform granting.
 +     *
-+     * Wine's own virtual_init_user_shared_data() maps this same section wherever
-+     * the kernel chooses, so a fixed address is not something Wine's code needs
-+     * in order to work. Windows binaries that hardcode 0x7ffe0000 are the cost of
-+     * the platform; docs/wine-arm64-address-space.md records it. */
-+    {
-+        void *page = mmap( (void *)0x7ff000000000, host_page_size, PROT_NONE,
-+                           MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0 );
-+
-+        ERR( "arm64 shared user data page: %p (host limit %p, user limit %p, as limit %p)\n",
-+             page, host_addr_space_limit, user_space_limit, address_space_limit );
-+        if (page != MAP_FAILED) user_shared_data = page;
-+    }
++     * It is deliberately not mapped here. The first attempt reserved it with
++     * mmap, and map_fixed_area() then refused it with STATUS_CONFLICTING_ADDRESSES
++     * -- not from the limit checks, which the line below shows passing, but from
++     * anon_mmap_tryfixed() finding the range already taken and reporting EEXIST.
++     * The address has to be free for Wine to map its page into it, and it is left
++     * free. */
++    user_shared_data = (void *)0x7ff000000000;
++    ERR( "arm64 shared user data page: %p (host limit %p, user limit %p, as limit %p)\n",
++         user_shared_data, host_addr_space_limit, user_space_limit, address_space_limit );
 +#endif
      mmap_init( preload_info ? *preload_info : NULL );
  

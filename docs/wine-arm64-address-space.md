@@ -45,7 +45,7 @@ at a normal PIE base before it would run.
 
 1. `user_shared_data` becomes a variable on `__APPLE__ && __aarch64__` instead of
    the constant `0x7ffe0000`.
-2. `virtual_init()` reserves the page at Wine's own top-down base,
+2. `virtual_init()` moves the page to Wine's own top-down base,
    `0x7ff000000000` (`configure.ac`, `-segaddr,WINE_TOP_DOWN`), which the probe
    measured this platform granting. It is done in `virtual_init()` rather than in
    `mmap_init()` because the branch of `mmap_init()` that handles the 64-bit layout
@@ -82,3 +82,15 @@ The 32-bit and low-64-bit regions Wine reserves for WoW64 and for the low
 allocation area do not exist on this platform either. Nothing in the D3D11 stage
 needs them, and the failure that blocked the load test is gone once the shared user
 data has somewhere to live. WoW64 is not part of the current stage.
+
+## The third measurement: the page must be free, not reserved
+
+Reserving the page with `mmap` in the patch does not work either, and the reason is
+in `map_fixed_area()`: it checks the limits, then calls `anon_mmap_tryfixed()` for
+the range, and a plain `mmap` reservation of ours leaves that range taken, so the
+call reports `EEXIST` and Wine translates it into `STATUS_CONFLICTING_ADDRESSES`,
+`c0000018`. The limits were never the problem on that run -- Wine printed them
+passing. The address is therefore set and left free, which is what Wine's own
+mapping code needs, and the `WINE_TOP_DOWN` reservation on x86_64 works because the
+reserved area there is registered with `mmap_add_reserved_area()` and not left as a
+bare mapping.
