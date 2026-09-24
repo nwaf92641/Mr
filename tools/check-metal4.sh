@@ -92,6 +92,7 @@ argument table descriptor|maxBufferBindCount|maxTextureBindCount|maxSamplerState
 render pass descriptor width|renderTargetWidth|renderTargetHeight
 barrier and fence|barrierAfterQueueStages|barrierAfterStages
 encoder fence|updateFence|waitForFence|afterEncoderStages|beforeEncoderStages
+mesh dispatch|MeshThreadgroups|indirectMeshBuffer
 suspend resume|MTL4RenderEncoderOption
 PATTERNS
 }
