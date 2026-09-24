@@ -1158,3 +1158,123 @@ void *mr_mtl4_transient_buffer(mr_mtl4_transient *transient) {
   }
   return (__bridge void *)transient->buffer;
 }
+
+/* ----------------------------------------------------------------- residency */
+
+struct mr_mtl4_residency {
+  id set; /* id<MTLResidencySet> */
+  uint32_t added;
+  uint32_t capacity;
+  uint32_t rejected;
+  bool dirty;
+};
+
+MR_MTL4_AVAIL static mr_mtl4_residency *residency_create_impl(mr_mtl4_device *device,
+                                                             uint32_t capacity) {
+  if (capacity == 0) {
+    mr_mtl4_fail("mr_mtl4_residency_create: zero capacity");
+    return nullptr;
+  }
+  MTLResidencySetDescriptor *desc = [[MTLResidencySetDescriptor alloc] init];
+  desc.initialCapacity = (NSInteger)capacity;
+  NSError *error = nil;
+  id<MTLResidencySet> set = [(id<MTLDevice>)device->mtl newResidencySetWithDescriptor:desc
+                                                                                error:&error];
+  if (set == nil) {
+    mr_mtl4_fail(error != nil ? [[error localizedDescription] UTF8String]
+                              : "[MTLDevice newResidencySetWithDescriptor:error:] returned nil");
+    return nullptr;
+  }
+  auto *residency = new mr_mtl4_residency{};
+  residency->set = set;
+  residency->capacity = capacity;
+  return residency;
+}
+
+mr_mtl4_residency *mr_mtl4_residency_create(mr_mtl4_device *device, uint32_t capacity) {
+  if (device == nullptr) {
+    mr_mtl4_fail("mr_mtl4_residency_create: null device");
+    return nullptr;
+  }
+  if (@available(iOS 26.0, macOS 26.0, *)) {
+    return residency_create_impl(device, capacity);
+  }
+  mr_mtl4_fail("Metal 4 requires iOS 26 or macOS 26");
+  return nullptr;
+}
+
+void mr_mtl4_residency_destroy(mr_mtl4_residency *residency) {
+  if (residency == nullptr) {
+    return;
+  }
+  residency->set = nil;
+  delete residency;
+}
+
+MR_MTL4_AVAIL static bool residency_add_impl(mr_mtl4_residency *residency, void *allocation) {
+  if (allocation == nullptr) {
+    return false;
+  }
+  if (residency->added >= residency->capacity) {
+    /* A resource that does not fit is a hard failure rather than something to
+     * ignore: the draw that reads it is invalid, and Metal would report that
+     * against the draw rather than against the binding that overflowed. */
+    residency->rejected += 1;
+    mr_mtl4_fail("mr_mtl4_residency_add: set is full; raise the capacity for this frame");
+    return false;
+  }
+  /* Adding the same allocation twice is not an error, so a caller does not have
+   * to deduplicate resources the binding path meets many times per frame. */
+  [(id<MTLResidencySet>)residency->set addAllocation:(__bridge id<MTLAllocation>)allocation];
+  residency->added += 1;
+  residency->dirty = true;
+  return true;
+}
+
+bool mr_mtl4_residency_add(mr_mtl4_residency *residency, void *mtl_allocation) {
+  if (residency == nullptr || mtl_allocation == nullptr) {
+    return false;
+  }
+  if (@available(iOS 26.0, macOS 26.0, *)) {
+    return residency_add_impl(residency, mtl_allocation);
+  }
+  mr_mtl4_fail("Metal 4 requires iOS 26 or macOS 26");
+  return false;
+}
+
+MR_MTL4_AVAIL static bool residency_commit_impl(mr_mtl4_residency *residency) {
+  [(id<MTLResidencySet>)residency->set commit];
+  residency->dirty = false;
+  return true;
+}
+
+bool mr_mtl4_residency_commit(mr_mtl4_residency *residency) {
+  if (residency == nullptr) {
+    mr_mtl4_fail("mr_mtl4_residency_commit: null residency set");
+    return false;
+  }
+  if (@available(iOS 26.0, macOS 26.0, *)) {
+    return residency_commit_impl(residency);
+  }
+  mr_mtl4_fail("Metal 4 requires iOS 26 or macOS 26");
+  return false;
+}
+
+void *mr_mtl4_residency_metal_set(mr_mtl4_residency *residency) {
+  if (residency == nullptr) {
+    return nullptr;
+  }
+  return (__bridge void *)residency->set;
+}
+
+bool mr_mtl4_residency_dirty(const mr_mtl4_residency *residency) {
+  return residency != nullptr && residency->dirty;
+}
+
+uint32_t mr_mtl4_residency_added(const mr_mtl4_residency *residency) {
+  return residency != nullptr ? residency->added : 0;
+}
+
+uint32_t mr_mtl4_residency_rejected(const mr_mtl4_residency *residency) {
+  return residency != nullptr ? residency->rejected : 0;
+}

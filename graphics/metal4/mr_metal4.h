@@ -99,6 +99,36 @@ void *mr_mtl4_device_queue(mr_mtl4_device *device);
  * buffers and textures are resident at draw time. False if Metal rejects it. */
 bool mr_mtl4_device_add_residency_set(mr_mtl4_device *device, void *mtl_residency_set);
 
+/* ---------------------------------------------------------------- residency */
+
+/* Metal 4 does not keep encoder-bound resources resident by itself: a draw that
+ * reads a buffer or texture which is not in a set attached to the queue is
+ * invalid even though every call succeeded. This is that set. Create one per
+ * device, add every resource a frame touches, commit before the frame is
+ * committed, and attach it to the queue with
+ * mr_mtl4_device_add_residency_set. */
+typedef struct mr_mtl4_residency mr_mtl4_residency;
+
+mr_mtl4_residency *mr_mtl4_residency_create(mr_mtl4_device *device, uint32_t capacity);
+void mr_mtl4_residency_destroy(mr_mtl4_residency *residency);
+
+/* mtl_allocation is an id<MTLAllocation> -- an MTLBuffer or MTLTexture. Adding
+ * the same resource twice succeeds and changes nothing, because the binding path
+ * sees each one many times per frame and a caller should not have to deduplicate
+ * to use this. */
+bool mr_mtl4_residency_add(mr_mtl4_residency *residency, void *mtl_allocation);
+
+/* Publishes everything added since the last commit. Required before any draw
+ * that reads it; a frame that commits this at the end of encoding is correct
+ * because the GPU does not start until the command buffer is committed. */
+bool mr_mtl4_residency_commit(mr_mtl4_residency *residency);
+/* The raw id<MTLResidencySet>, for attaching with
+ * mr_mtl4_device_add_residency_set. */
+void *mr_mtl4_residency_metal_set(mr_mtl4_residency *residency);
+bool mr_mtl4_residency_dirty(const mr_mtl4_residency *residency);
+uint32_t mr_mtl4_residency_added(const mr_mtl4_residency *residency);
+uint32_t mr_mtl4_residency_rejected(const mr_mtl4_residency *residency);
+
 /* One argument table per encoding thread is the model: tables are reusable
  * across encoders and frames, so they are sized for the widest shader set they
  * will see, not per draw. stages selects where the table is used; a render

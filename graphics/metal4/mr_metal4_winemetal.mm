@@ -52,6 +52,7 @@ struct State {
   Stage vertex;
   Stage fragment;
   mr_mtl4_transient *transient;
+  mr_mtl4_residency *residency;
   uint32_t untranslated; /* types with no translation, reported once each */
   uint32_t reported[64];
   uint32_t reported_count;
@@ -96,6 +97,7 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
       }
       state.vertex.buffers[cmd->index] = MR_WMT_OBJ(cmd->buffer);
       state.vertex.offsets[cmd->index] = cmd->offset;
+      mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->buffer));
       rebind(state.vertex, state.vertex_table, cmd->index);
       return true;
     }
@@ -115,6 +117,7 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
       }
       state.fragment.buffers[cmd->index] = MR_WMT_OBJ(cmd->buffer);
       state.fragment.offsets[cmd->index] = cmd->offset;
+      mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->buffer));
       rebind(state.fragment, state.fragment_table, cmd->index);
       return true;
     }
@@ -129,6 +132,7 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
     }
     case WMTRenderCommandSetFragmentTexture: {
       const auto *cmd = (const struct wmtcmd_render_settexture *)command;
+      mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->texture));
       mr_mtl4_table_set_texture(state.fragment_table, MR_WMT_RAW(cmd->texture), cmd->index);
       return true;
     }
@@ -235,6 +239,80 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
       [state.encoder setStencilReferenceValue:cmd->stencil_ref];
       return true;
     }
+    case WMTRenderCommandSetRasterizerState: {
+      const auto *cmd = (const struct wmtcmd_render_setrasterizerstate *)command;
+      /* The WMT enums are Metal's own order, so these are the same values and
+       * not a translation table. Fill mode and culling live on the encoder in
+       * Metal 4 as they did in Metal 3; only the pipeline state's own
+       * rasterization fields are metal-3 concept. */
+      [state.encoder setTriangleFillMode:(MTLTriangleFillMode)cmd->fill_mode];
+      [state.encoder setCullMode:(MTLCullMode)cmd->cull_mode];
+      [state.encoder setFrontFacingWinding:(MTLWinding)cmd->winding];
+      [state.encoder setDepthClipMode:(MTLDepthClipMode)cmd->depth_clip_mode];
+      [state.encoder setDepthBias:cmd->depth_bias
+                       slopeScale:cmd->scole_scale
+                            clamp:cmd->depth_bias_clamp];
+      return true;
+    }
+    case WMTRenderCommandSetVisibilityMode: {
+      const auto *cmd = (const struct wmtcmd_render_setvisibilitymode *)command;
+      [state.encoder setVisibilityResultMode:(MTLVisibilityResultMode)cmd->mode
+                                      offset:(NSUInteger)cmd->offset];
+      return true;
+    }
+    case WMTRenderCommandDrawIndirect: {
+      const auto *cmd = (const struct wmtcmd_render_draw_indirect *)command;
+      id<MTLBuffer> arguments = MR_WMT_OBJ(cmd->indirect_args_buffer);
+      if (arguments == nil) {
+        break;
+      }
+      /* Metal 4 takes the indirect arguments as an address, like every other
+       * buffer, so the offset folds into the address rather than being a
+       * separate argument. */
+      mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->indirect_args_buffer));
+      [state.encoder drawPrimitives:(MTLPrimitiveType)cmd->primitive_type
+                     indirectBuffer:(MTLGPUAddress)((uint64_t)[arguments gpuAddress] +
+                                                    cmd->indirect_args_offset)];
+      return true;
+    }
+    case WMTRenderCommandDrawIndexedIndirect: {
+      const auto *cmd = (const struct wmtcmd_render_draw_indexed_indirect *)command;
+      id<MTLBuffer> index_buffer = MR_WMT_OBJ(cmd->index_buffer);
+      id<MTLBuffer> arguments = MR_WMT_OBJ(cmd->indirect_args_buffer);
+      if (index_buffer == nil || arguments == nil) {
+        break;
+      }
+      mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->index_buffer));
+      mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->indirect_args_buffer));
+      const uint64_t index_address =
+          (uint64_t)[index_buffer gpuAddress] + cmd->index_buffer_offset;
+      const uint64_t index_length =
+          (uint64_t)[index_buffer length] - cmd->index_buffer_offset;
+      [state.encoder
+          drawIndexedPrimitives:(MTLPrimitiveType)cmd->primitive_type
+                     indexType:(MTLIndexType)cmd->index_type
+                   indexBuffer:(MTLGPUAddress)index_address
+             indexBufferLength:(NSUInteger)index_length
+                indirectBuffer:(MTLGPUAddress)((uint64_t)[arguments gpuAddress] +
+                                               cmd->indirect_args_offset)];
+      return true;
+    }
+    case WMTRenderCommandDrawMeshThreadgroups: {
+      const auto *cmd = (const struct wmtcmd_render_draw_meshthreadgroups *)command;
+      /* object and mesh threadgroup sizes are Metal 3 pipeline state; in Metal 4
+       * they are still passed with the draw. */
+      [state.encoder
+          drawMeshThreadgroups:MTLSizeMake(cmd->threadgroup_per_grid.x,
+                                           cmd->threadgroup_per_grid.y,
+                                           cmd->threadgroup_per_grid.z)
+              threadsPerObjectThreadgroup:MTLSizeMake(cmd->object_threadgroup_size.x,
+                                                      cmd->object_threadgroup_size.y,
+                                                      cmd->object_threadgroup_size.z)
+                threadsPerMeshThreadgroup:MTLSizeMake(cmd->mesh_threadgroup_size.x,
+                                                      cmd->mesh_threadgroup_size.y,
+                                                      cmd->mesh_threadgroup_size.z)];
+      return true;
+    }
     case WMTRenderCommandDraw: {
       const auto *cmd = (const struct wmtcmd_render_draw *)command;
       [state.encoder drawPrimitives:(MTLPrimitiveType)cmd->primitive_type
@@ -250,6 +328,7 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
       if (index_buffer == nil) {
         break;
       }
+      mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->index_buffer));
       const uint64_t address = (uint64_t)[index_buffer gpuAddress] + cmd->index_buffer_offset;
       /* Metal 4 bounds-checks index values against this length rather than
        * trusting indexCount, so it is the whole range reachable from the
@@ -290,7 +369,7 @@ Journal &journal() {
 
 uint32_t mr_mtl4_wmt_encode_render(void *mtl4_render_encoder, mr_mtl4_table *vertex_table,
                                    mr_mtl4_table *fragment_table, void *mtl4_transient,
-                                   const void *cmd_head) {
+                                   mr_mtl4_residency *residency, const void *cmd_head) {
   if (cmd_head == nullptr) {
     return 0;
   }
@@ -304,6 +383,7 @@ uint32_t mr_mtl4_wmt_encode_render(void *mtl4_render_encoder, mr_mtl4_table *ver
   state.vertex_table = vertex_table;
   state.fragment_table = fragment_table;
   state.transient = (mr_mtl4_transient *)mtl4_transient;
+  state.residency = residency;
 
   if (@available(iOS 26.0, macOS 26.0, *)) {
     if (state.encoder != nil) {
@@ -334,6 +414,9 @@ uint32_t mr_mtl4_wmt_encode_render(void *mtl4_render_encoder, mr_mtl4_table *ver
         log.translated[log.translated_count++] = command->type;
       }
     }
+  }
+  if (mr_mtl4_residency_dirty(state.residency)) {
+    mr_mtl4_residency_commit(state.residency);
   }
   log.untranslated_count = state.reported_count;
   for (uint32_t i = 0; i < state.reported_count && i < 64; ++i) {
@@ -383,6 +466,7 @@ struct Session {
   mr_mtl4_table *vertex_table;
   mr_mtl4_table *fragment_table;
   mr_mtl4_transient *transient;
+  mr_mtl4_residency *residency;
   mr_mtl4_frame *frames[kMaxFrames];
   __unsafe_unretained id encoder_object[kMaxEncoders];
   bool encoder_live[kMaxEncoders];
@@ -425,6 +509,15 @@ Session &start_session() {
   state.fragment_table =
       mr_mtl4_device_new_table(state.device, 32, 128, 16, MR_MTL4_STAGE_FRAGMENT, false);
   state.transient = mr_mtl4_transient_create(mr_mtl4_device_metal_device(state.device), 4u << 20);
+  /* Attached to the queue, so every frame's draws see it. The capacity has to
+   * cover every distinct resource a frame touches, not every binding. */
+  state.residency = mr_mtl4_residency_create(state.device, 4096);
+  if (state.residency != nullptr &&
+      !mr_mtl4_device_add_residency_set(state.device,
+                                        (void *)mr_mtl4_residency_metal_set(state.residency))) {
+    fprintf(stderr, "[mr-mtl4] residency attach failed: %s\n", mr_mtl4_last_error());
+    state.failed = true;
+  }
   if (state.vertex_table == nullptr || state.fragment_table == nullptr ||
       state.transient == nullptr) {
     fprintf(stderr, "[mr-mtl4] session start failed: %s\n", mr_mtl4_last_error());
@@ -545,7 +638,8 @@ bool mr_mtl4_wmt_session_encode(uint64_t encoder, const void *cmd_head, uint32_t
   }
   const uint32_t translated =
       mr_mtl4_wmt_encode_render((__bridge void *)state.encoder_object[index], state.vertex_table,
-                                state.fragment_table, state.transient, cmd_head);
+                                state.fragment_table, state.transient, state.residency,
+                                cmd_head);
   if (out_translated != nullptr) {
     *out_translated = translated;
   }

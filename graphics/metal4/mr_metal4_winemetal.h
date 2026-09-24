@@ -40,7 +40,7 @@ extern "C" {
  * working frame with missing state. */
 uint32_t mr_mtl4_wmt_encode_render(void *mtl4_render_encoder, mr_mtl4_table *vertex_table,
                                    mr_mtl4_table *fragment_table, void *mtl4_transient,
-                                   const void *cmd_head);
+                                   mr_mtl4_residency *residency, const void *cmd_head);
 
 /* The type ids the walker translated on the last call, in the order it first
  * met them, so a test can assert what a frame actually contained rather than
