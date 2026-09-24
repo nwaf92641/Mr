@@ -83,6 +83,59 @@ static void probe_file( const char *path )
     close( fd );
 }
 
+/* The same file, mapped the two other ways Wine maps it. map_file_into_view()
+ * takes MAP_PRIVATE on Linux for a read-only view, and on every other platform --
+ * macOS included -- MAP_SHARED with the write bit cleared. If the executable bit
+ * is refused on the shared mapping and granted on the private one, that branch is
+ * the reason this platform cannot make a PE .text section executable. */
+static void probe_shared( const char *path, int writable )
+{
+    struct stat st;
+    int fd = open( path, writable ? O_RDWR : O_RDONLY );
+    void *p;
+
+    if (fd == -1)
+    {
+        printf( "EXEC SKIP %-30s cannot open %s\n",
+                writable ? "shared rw, then rx" : "shared ro, then rx", path );
+        return;
+    }
+    if (fstat( fd, &st ) == -1 || st.st_size == 0)
+    {
+        close( fd );
+        return;
+    }
+
+    errno = 0;
+    p = mmap( NULL, (size_t)st.st_size, writable ? PROT_READ | PROT_WRITE : PROT_READ,
+              MAP_SHARED, fd, 0 );
+    if (p == MAP_FAILED)
+    {
+        report( writable ? "shared rw, then rx" : "shared ro, then rx", p, errno );
+        close( fd );
+        return;
+    }
+
+    /* The request Wine makes for a section it cannot map executably first, and then
+     * the one it makes for .text. The first prints an errno even though it is only
+     * read: that is the one that was printed as Permission denied for the header. */
+    errno = 0;
+    if (mprotect( p, (size_t)st.st_size, PROT_READ ) == -1)
+        report( writable ? "shared rw, mprotect read" : "shared ro, mprotect read",
+                MAP_FAILED, errno );
+    else
+        report( writable ? "shared rw, mprotect read" : "shared ro, mprotect read", p, 0 );
+
+    errno = 0;
+    if (mprotect( p, (size_t)st.st_size, PROT_READ | PROT_EXEC ) == -1)
+        report( writable ? "shared rw, then rx" : "shared ro, then rx", MAP_FAILED, errno );
+    else
+        report( writable ? "shared rw, then rx" : "shared ro, then rx", p, 0 );
+
+    munmap( p, (size_t)st.st_size );
+    close( fd );
+}
+
 int main( int argc, char **argv )
 {
     size_t page = (size_t)getpagesize();
@@ -167,6 +220,8 @@ int main( int argc, char **argv )
     /* The file the workflow passes is the load test, which is the exact file Wine
      * maps and could not make executable. Without an argument, this binary. */
     probe_file( argc > 1 ? argv[1] : argv[0] );
+    probe_shared( argc > 1 ? argv[1] : argv[0], 0 );
+    probe_shared( argc > 1 ? argv[1] : argv[0], 1 );
 
     return 0;
 }
