@@ -54,6 +54,7 @@ struct Stages {
   Stage vertex;
   Stage fragment;
   Stage object;
+  Stage mesh;
 };
 
 Stages &wmt_stages() {
@@ -66,6 +67,7 @@ struct State {
   mr_mtl4_table *vertex_table;
   mr_mtl4_table *fragment_table;
   mr_mtl4_table *object_table;
+  mr_mtl4_table *mesh_table;
   mr_mtl4_transient *transient;
   mr_mtl4_residency *residency;
   uint32_t untranslated; /* types with no translation, reported once each */
@@ -356,6 +358,84 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
           visibilityOptions:(MTL4VisibilityOptions)0];
       return true;
     }
+    case WMTRenderCommandSetObjectBuffer: {
+      const auto *cmd = (const struct wmtcmd_render_setbuffer *)command;
+      if (!wmt_stages().object.valid(cmd->index)) {
+        break;
+      }
+      wmt_stages().object.buffers[cmd->index] = MR_WMT_OBJ(cmd->buffer);
+      wmt_stages().object.offsets[cmd->index] = cmd->offset;
+      mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->buffer));
+      rebind(wmt_stages().object, state.object_table, cmd->index);
+      return true;
+    }
+    case WMTRenderCommandSetObjectBufferOffset: {
+      const auto *cmd = (const struct wmtcmd_render_setbufferoffset *)command;
+      if (!wmt_stages().object.valid(cmd->index) ||
+          wmt_stages().object.buffers[cmd->index] == nil) {
+        /* Without the base from an earlier SetObjectBuffer the address this
+         * should produce is unknown; rebinding nothing would leave the slot
+         * pointing wherever it last did. */
+        break;
+      }
+      wmt_stages().object.offsets[cmd->index] = cmd->offset;
+      rebind(wmt_stages().object, state.object_table, cmd->index);
+      return true;
+    }
+    case WMTRenderCommandSetMeshBuffer: {
+      const auto *cmd = (const struct wmtcmd_render_setbuffer *)command;
+      if (!wmt_stages().mesh.valid(cmd->index)) {
+        break;
+      }
+      wmt_stages().mesh.buffers[cmd->index] = MR_WMT_OBJ(cmd->buffer);
+      wmt_stages().mesh.offsets[cmd->index] = cmd->offset;
+      mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->buffer));
+      rebind(wmt_stages().mesh, state.mesh_table, cmd->index);
+      return true;
+    }
+    case WMTRenderCommandSetMeshBufferOffset: {
+      const auto *cmd = (const struct wmtcmd_render_setbufferoffset *)command;
+      if (!wmt_stages().mesh.valid(cmd->index) || wmt_stages().mesh.buffers[cmd->index] == nil) {
+        break;
+      }
+      wmt_stages().mesh.offsets[cmd->index] = cmd->offset;
+      rebind(wmt_stages().mesh, state.mesh_table, cmd->index);
+      return true;
+    }
+    case WMTRenderCommandDrawMeshThreadgroups: {
+      const auto *cmd = (const struct wmtcmd_render_draw_meshthreadgroups *)command;
+      /* WMTSize's members are width, height and depth -- read from DXMT's own
+       * accessors, not assumed. */
+      [state.encoder
+          drawMeshThreadgroups:MTLSizeMake(cmd->threadgroup_per_grid.width,
+                                           cmd->threadgroup_per_grid.height,
+                                           cmd->threadgroup_per_grid.depth)
+              threadsPerObjectThreadgroup:MTLSizeMake(cmd->object_threadgroup_size.width,
+                                                      cmd->object_threadgroup_size.height,
+                                                      cmd->object_threadgroup_size.depth)
+                threadsPerMeshThreadgroup:MTLSizeMake(cmd->mesh_threadgroup_size.width,
+                                                      cmd->mesh_threadgroup_size.height,
+                                                      cmd->mesh_threadgroup_size.depth)];
+      return true;
+    }
+    case WMTRenderCommandDrawMeshThreadgroupsIndirect: {
+      const auto *cmd = (const struct wmtcmd_render_draw_meshthreadgroups_indirect *)command;
+      id<MTLBuffer> arguments = MR_WMT_OBJ(cmd->indirect_args_buffer);
+      if (arguments == nil) {
+        break;
+      }
+      mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->indirect_args_buffer));
+      [state.encoder
+          drawMeshThreadgroupsWithIndirectBuffer:(MTLGPUAddress)((uint64_t)[arguments gpuAddress] +
+                                                                 cmd->indirect_args_offset)
+                        threadsPerObjectThreadgroup:MTLSizeMake(cmd->object_threadgroup_size.width,
+                                                                cmd->object_threadgroup_size.height,
+                                                                cmd->object_threadgroup_size.depth)
+                          threadsPerMeshThreadgroup:MTLSizeMake(cmd->mesh_threadgroup_size.width,
+                                                                cmd->mesh_threadgroup_size.height,
+                                                                cmd->mesh_threadgroup_size.depth)];
+      return true;
+    }
     case WMTRenderCommandDXMTGeometryDraw:
     case WMTRenderCommandDXMTGeometryDrawIndexed:
     case WMTRenderCommandDXMTGeometryDrawIndirect:
@@ -590,12 +670,13 @@ Journal &journal() {
 
 uint32_t mr_mtl4_wmt_encode_render(void *mtl4_render_encoder, mr_mtl4_table *vertex_table,
                                    mr_mtl4_table *fragment_table, mr_mtl4_table *object_table,
-                                   void *mtl4_transient, mr_mtl4_residency *residency,
-                                   const void *cmd_head) {
+                                   mr_mtl4_table *mesh_table, void *mtl4_transient,
+                                   mr_mtl4_residency *residency, const void *cmd_head) {
   if (cmd_head == nullptr) {
     return 0;
   }
-  if (vertex_table == nullptr || fragment_table == nullptr || object_table == nullptr) {
+  if (vertex_table == nullptr || fragment_table == nullptr || object_table == nullptr ||
+      mesh_table == nullptr) {
     fprintf(stderr, "[mr-mtl4] encode_render with no argument table -- nothing encoded\n");
     return 0;
   }
@@ -605,6 +686,7 @@ uint32_t mr_mtl4_wmt_encode_render(void *mtl4_render_encoder, mr_mtl4_table *ver
   state.vertex_table = vertex_table;
   state.fragment_table = fragment_table;
   state.object_table = object_table;
+  state.mesh_table = mesh_table;
   state.transient = (mr_mtl4_transient *)mtl4_transient;
   state.residency = residency;
 
@@ -628,6 +710,9 @@ uint32_t mr_mtl4_wmt_encode_render(void *mtl4_render_encoder, mr_mtl4_table *ver
       [(id<MTL4RenderCommandEncoder>)state.encoder
           setArgumentTable:(__bridge id<MTL4ArgumentTable>)mr_mtl4_table_metal_table(object_table)
                   atStages:MTLRenderStageObject];
+      [(id<MTL4RenderCommandEncoder>)state.encoder
+          setArgumentTable:(__bridge id<MTL4ArgumentTable>)mr_mtl4_table_metal_table(mesh_table)
+                  atStages:MTLRenderStageMesh];
     }
   } else {
     fprintf(stderr, "[mr-mtl4] encode_render on a system without Metal 4 -- nothing encoded\n");
@@ -696,6 +781,7 @@ struct Session {
   mr_mtl4_table *vertex_table;
   mr_mtl4_table *fragment_table;
   mr_mtl4_table *object_table;
+  mr_mtl4_table *mesh_table;
   mr_mtl4_transient *transient;
   mr_mtl4_residency *residency;
   mr_mtl4_frame *frames[kMaxFrames];
@@ -741,6 +827,8 @@ Session &start_session() {
       mr_mtl4_device_new_table(state.device, 32, 128, 16, MR_MTL4_STAGE_FRAGMENT, false);
   state.object_table =
       mr_mtl4_device_new_table(state.device, 32, 0, 0, MR_MTL4_STAGE_OBJECT, true);
+  state.mesh_table =
+      mr_mtl4_device_new_table(state.device, 32, 0, 0, MR_MTL4_STAGE_MESH, true);
   state.transient = mr_mtl4_transient_create(mr_mtl4_device_metal_device(state.device), 4u << 20);
   /* Attached to the queue, so every frame's draws see it. The capacity has to
    * cover every distinct resource a frame touches, not every binding. */
@@ -752,7 +840,8 @@ Session &start_session() {
     state.failed = true;
   }
   if (state.vertex_table == nullptr || state.fragment_table == nullptr ||
-      state.object_table == nullptr || state.transient == nullptr) {
+      state.object_table == nullptr || state.mesh_table == nullptr ||
+      state.transient == nullptr) {
     fprintf(stderr, "[mr-mtl4] session start failed: %s\n", mr_mtl4_last_error());
     state.failed = true;
   }
@@ -877,8 +966,8 @@ bool mr_mtl4_wmt_session_encode(uint64_t encoder, const void *cmd_head, uint32_t
   }
   const uint32_t translated =
       mr_mtl4_wmt_encode_render((__bridge void *)state.encoder_object[index], state.vertex_table,
-                                state.fragment_table, state.object_table, state.transient,
-                                state.residency, cmd_head);
+                                state.fragment_table, state.object_table, state.mesh_table,
+                                state.transient, state.residency, cmd_head);
   if (out_translated != nullptr) {
     *out_translated = translated;
   }
