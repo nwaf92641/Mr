@@ -53,7 +53,11 @@ compile() {
     OBJECTS+=("$OBJ_DIR/$name.o")
 }
 
-compile winemetal_unix clang "$DXMT_SRC/winemetal/unix/winemetal_unix.c" -x objective-c
+# MR_MTL4_BRIDGE turns on the route guards the DXMT patch adds: they are behind
+# the macro so that DXMT's own builds -- the PE side, the wire tests -- compile
+# this file exactly as before.
+compile winemetal_unix clang "$DXMT_SRC/winemetal/unix/winemetal_unix.c" -x objective-c \
+    -DMR_MTL4_BRIDGE -I"$REPO_ROOT/graphics/metal4"
 compile cache clang "$DXMT_SRC/winemetal/unix/cache.c" -x objective-c
 
 # Mr's Metal 4 layer. It is a separate component rather than part of the DXMT

@@ -548,6 +548,13 @@ bool mr_mtl4_frame_encoder_is_open(const mr_mtl4_frame *frame) {
   return frame != nullptr && frame->encoder_open;
 }
 
+void *mr_mtl4_frame_metal_encoder(mr_mtl4_frame *frame) {
+  if (frame == nullptr || frame->render == nil) {
+    return nullptr;
+  }
+  return (__bridge void *)frame->render;
+}
+
 void mr_mtl4_frame_bind_table(mr_mtl4_frame *frame, mr_mtl4_table *table) {
   if (frame == nullptr || table == nullptr) {
     mr_mtl4_fail("mr_mtl4_frame_bind_table: null argument");

@@ -1,0 +1,103 @@
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index 54b495c..24d4cfc 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -34,6 +34,13 @@ extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name,
+ #include <mach/mach_port.h>
+ #define WINEMETAL_API
+ #include "../winemetal_thunks.h"
++#if defined(MR_MTL4_BRIDGE)
++/* Mr's Metal 4 route. Guarded so DXMT's own builds -- the PE side, the wire
++ * tests, anything that does not define MR_MTL4_BRIDGE -- are untouched by the
++ * patch: without the macro this file compiles exactly as before. */
++#include "mr_metal4_winemetal.h"
++#endif
++
+ #include "../airconv_thunks.h"
+ 
+ /* iOS-Madeira 2026-05-22 draw-call telemetry. Defined further down with
+@@ -203,6 +210,15 @@ _NSAutoreleasePool_alloc_init(void *obj) {
+ static NTSTATUS
+ _MTLCommandQueue_commandBuffer(void *obj) {
+   struct unixcall_generic_obj_obj_ret *params = obj;
++  if (!wmtr_enabled() && mr_mtl4_wmt_session_available()) {
++    /* The guest's command buffer handle becomes a token for an MTL4 command
++     * buffer and the allocator it owns. */
++    obj_handle_t token = (obj_handle_t)mr_mtl4_wmt_session_command_buffer(params->handle);
++    if (token) {
++      params->ret = token;
++      return STATUS_SUCCESS;
++    }
++  }
+   if (wmtr_enabled()) {
+     struct rm_arg_handle a = { params->handle };
+     struct rm_ret_handle r;
+@@ -216,6 +232,11 @@ _MTLCommandQueue_commandBuffer(void *obj) {
+ static NTSTATUS
+ _MTLCommandBuffer_commit(void *obj) {
+   struct unixcall_generic_obj_noret *params = obj;
++  if (!wmtr_enabled() && mr_mtl4_wmt_session_commit(params->handle)) {
++    /* No guest-shadow flush here, unlike the remote transport: on this path the
++     * buffers are unified memory the GPU already sees. */
++    return STATUS_SUCCESS;
++  }
+   if (wmtr_enabled()) {
+     /* Push guest shadows BEFORE the GPU reads them. The app writes into buffer
+      * contents with no call of its own, so this is the last point at which the
+@@ -232,6 +253,9 @@ _MTLCommandBuffer_commit(void *obj) {
+ static NTSTATUS
+ _MTLCommandBuffer_waitUntilCompleted(void *obj) {
+   struct unixcall_generic_obj_noret *params = obj;
++  if (!wmtr_enabled() && mr_mtl4_wmt_session_wait(params->handle)) {
++    return STATUS_SUCCESS;
++  }
+   if (wmtr_enabled()) {
+     struct rm_arg_handle a = { params->handle };
+     wmtr_call(RM_OP_WAIT_COMPLETED, &a, sizeof a, 0, 0, 0);
+@@ -930,6 +954,13 @@ static NTSTATUS
+ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
+   struct unixcall_generic_obj_uint64_obj_ret *params = obj;
+   struct WMTRenderPassInfo *info = (struct WMTRenderPassInfo *)params->arg;
++  if (!wmtr_enabled() && mr_mtl4_wmt_session_available()) {
++    uint64_t encoder = 0;
++    if (mr_mtl4_wmt_session_render_encoder(params->handle, info, &encoder)) {
++      params->ret = (obj_handle_t)encoder;
++      return STATUS_SUCCESS;
++    }
++  }
+   if (wmtr_enabled()) {
+     /* The full pass: eight colour attachments with their own load/store
+      * actions, levels, slices and resolve targets, plus depth and stencil.
+@@ -996,6 +1027,9 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
+ static NTSTATUS
+ _MTLCommandEncoder_endEncoding(void *obj) {
+   struct unixcall_generic_obj_noret *params = obj;
++  if (!wmtr_enabled() && mr_mtl4_wmt_session_end_encoding(params->handle)) {
++    return STATUS_SUCCESS;
++  }
+   if (wmtr_enabled()) {
+     struct rm_arg_handle a = { params->handle };
+     wmtr_call(RM_OP_END_ENCODING, &a, sizeof a, 0, 0, 0);
+@@ -1609,6 +1643,12 @@ static NTSTATUS
+ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
+   struct unixcall_generic_obj_cmd_noret *params = obj;
+   const struct wmtcmd_base *next = params->cmd_head.ptr;
++  if (!wmtr_enabled() && mr_mtl4_wmt_session_available()) {
++    uint32_t translated = 0;
++    if (mr_mtl4_wmt_session_encode((uint64_t)params->encoder, next, &translated)) {
++      return STATUS_SUCCESS;
++    }
++  }
+   if (wmtr_enabled()) {
+     /* Pack with the SAME packer the wire tests exercise: a second walker here
+      * would prove nothing about either. The batch replays into the existing
+@@ -2185,6 +2225,9 @@ int madeira_get_vsync_locked(void) { return g_madeira_vsync_mode; }
+ static NTSTATUS
+ _MTLCommandBuffer_presentDrawable(void *obj) {
+   struct unixcall_generic_obj_obj_noret *params = obj;
++  if (!wmtr_enabled() && mr_mtl4_wmt_session_present(params->handle, params->arg)) {
++    return STATUS_SUCCESS;
++  }
+   if (wmtr_enabled()) {
+     /* Presenting hands the drawable back to the host layer; without this the
+      * pool leaks one a frame and acquisition eventually blocks forever. */

@@ -214,6 +214,11 @@ bool mr_mtl4_frame_is_in_flight(const mr_mtl4_frame *frame);
  * forever. False on timeout. */
 bool mr_mtl4_frame_wait(mr_mtl4_frame *frame, uint64_t timeout_ms);
 
+/* The raw id<MTL4RenderCommandEncoder> of the open render pass, for the
+ * winemetal bridge, which issues encoder commands against it. nil when no
+ * render pass is open. */
+void *mr_mtl4_frame_metal_encoder(mr_mtl4_frame *frame);
+
 /* Presents through the queue rather than the command buffer, which is the
  * shape Metal 4 requires: the GPU waits for the drawable, the batch is
  * committed, the queue signals the drawable, the drawable presents. */

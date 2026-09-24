@@ -104,6 +104,29 @@ fi
 
 SOURCES=(mr_metal4.mm mr_metal4_milestone.mm)
 
+# The DXMT patch that routes winemetal's slots into the bridge. It is applied by
+# build/dxmt-ios/build-all.sh three hours into the IPA job, so a patch that no
+# longer applies would be discovered there; checking it here costs a second. A
+# patch that has already been applied counts as fine, because build-all.sh is
+# idempotent the same way.
+if [[ -d "$ROOT/research/dxmt/.git" || -f "$ROOT/research/dxmt/.git" ]]; then
+    for patch in "$ROOT"/patches/dxmt-*.patch; do
+        [[ -f "$patch" ]] || continue
+        name="$(basename "$patch")"
+        if git -C "$ROOT/research/dxmt" apply --check "$patch" 2>/dev/null; then
+            echo "check-metal4: patch applies: $name"
+        elif git -C "$ROOT/research/dxmt" apply --reverse --check "$patch" 2>/dev/null; then
+            echo "check-metal4: patch already applied: $name"
+        else
+            echo "check-metal4: FAIL -- $name does not apply to research/dxmt" >&2
+            echo "check-metal4:        research/dxmt is at $(git -C "$ROOT/research/dxmt" rev-parse --short HEAD)" >&2
+            status=1
+        fi
+    done
+else
+    echo "check-metal4: research/dxmt absent, skipping the route patch check"
+fi
+
 # The winemetal MTL4 bridge translates DXMT's serialised command lists, so it
 # includes DXMT's headers. It is only compiled when the submodule is present --
 # a clean clone has an empty submodule and this must not be the reason it fails.
