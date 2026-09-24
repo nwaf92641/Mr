@@ -109,7 +109,10 @@ SOURCES=(mr_metal4.mm mr_metal4_milestone.mm)
 # a clean clone has an empty submodule and this must not be the reason it fails.
 DXMT_WINEMETAL="$ROOT/research/dxmt/src/winemetal"
 if [[ -f "$DXMT_WINEMETAL/winemetal.h" && -f "$SRC_DIR/mr_metal4_winemetal.mm" ]]; then
-    FLAGS+=(-I"$DXMT_WINEMETAL" -I"$ROOT/research/dxmt/include" -I"$ROOT/research/dxmt/libs")
+    # winemetal.h is annotated with __declspec for the PE side, which clang
+    # accepts only with -fdeclspec. DXMT's own build passes it; without it here
+    # the bridge fails on the header, not on anything the bridge does.
+    FLAGS+=(-fdeclspec -I"$DXMT_WINEMETAL" -I"$ROOT/research/dxmt/include" -I"$ROOT/research/dxmt/libs")
     SOURCES+=(mr_metal4_winemetal.mm)
     echo "check-metal4: DXMT present, compiling the winemetal MTL4 bridge too"
 else
