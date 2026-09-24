@@ -566,6 +566,29 @@ jobs:
             echo "the reservation probe did not compile, see above" | tee -a "$out"
           fi
 
+          # The same yes-or-no question, asked about executable pages, because Wine
+          # answered it with map_image_into_view failed to set 60000020 protection on
+          # the load test's .text section. Unsigned first, then ad-hoc signed with the
+          # four entitlements that concern executable memory, so the difference between
+          # the two runs is the entitlements and nothing else.
+          echo "=== what this machine lets a running process execute ===" | tee -a "$out"
+          if /usr/bin/clang "$GITHUB_WORKSPACE/tests/wine/exec_probe.c" -o "$RUNNER_TEMP/exec_probe" >> "$out" 2>&1; then
+            echo "--- unsigned" | tee -a "$out"
+            "$RUNNER_TEMP/exec_probe" >> "$out" 2>&1
+            printf 'probe exit status: %d\n' "$?" | tee -a "$out"
+            cp "$RUNNER_TEMP/exec_probe" "$RUNNER_TEMP/exec_probe_signed"
+            if codesign --force --sign - --entitlements "$GITHUB_WORKSPACE/tests/wine/entitlements.plist" "$RUNNER_TEMP/exec_probe_signed" >> "$out" 2>&1; then
+              echo "--- ad-hoc signed with the executable memory entitlements" | tee -a "$out"
+              codesign -d --entitlements - "$RUNNER_TEMP/exec_probe_signed" >> "$out" 2>&1
+              "$RUNNER_TEMP/exec_probe_signed" >> "$out" 2>&1
+              printf 'probe exit status: %d\n' "$?" | tee -a "$out"
+            else
+              echo "the probe could not be signed, see above" | tee -a "$out"
+            fi
+          else
+            echo "the executable memory probe did not compile, see above" | tee -a "$out"
+          fi
+
           set +e
           run_limited 900 "$out" "./$WINE_LOADER" "$RUNNER_TEMP/load_d3d11.exe"
           rc=$?
