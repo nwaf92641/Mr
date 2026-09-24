@@ -112,9 +112,30 @@ jobs:
           # Recorded verbatim, because the report has to contain the command that
           # was actually run rather than an equivalent one.
           echo "meson setup build --buildtype release -Dnative_llvm_path=\$LLVM_ROOT"
+          # Why the SDK's lib directory is on the link line: airconv links LLVM 15
+          # from $LLVM_ROOT, whose lib directory holds libc++, libunwind and their
+          # reexports with @rpath install names. That directory reaches further than
+          # airconv -- the linker said so itself:
+          #   ld: warning: reexported library with install name
+          #   '@rpath/libunwind.1.dylib' found at
+          #   '/Users/runner/work/_temp/llvm/lib/libunwind.1.0.dylib'
+          # and the result was measured off the binaries: d3d10core, d3d11 and dxgi
+          # all depend on /usr/lib/libc++.1.dylib while winemetal.dylib depends on
+          # @rpath/libc++.1.dylib, which resolves only if something ships a libc++
+          # beside it. The SDK stub ahead of LLVM's directory makes every host-side
+          # dylib resolve libc++ the same way, and the audit below fails if any of
+          # them goes back to an @rpath dependency.
+          sdk_lib="$(/usr/bin/xcrun --show-sdk-path)/usr/lib"
+          test -f "$sdk_lib/libc++.tbd" || {
+            echo "::error title=the SDK libc++ stub is not where this expects::looked for $sdk_lib/libc++.tbd"
+            exit 1
+          }
+          echo "system libc++ stub: $sdk_lib/libc++.tbd"
           meson setup build \
             --buildtype release \
-            -Dnative_llvm_path="$LLVM_ROOT"
+            -Dnative_llvm_path="$LLVM_ROOT" \
+            -Dc_link_args="-L$sdk_lib" \
+            -Dcpp_link_args="-L$sdk_lib"
           meson introspect build --projectinfo
 
       - name: meson compile
@@ -197,6 +218,173 @@ jobs:
       # probe is broken" cannot be confused for one another. This is the same
       # mr_metal_probe() the Metal conformance test uses, so one function decides
       # what counts as a usable device.
+      # What the binaries depend on, read off the binaries.
+      #
+      # Two questions, and the first one is the reason this step exists. A dylib
+      # that resolves a library out of the directory that built it is broken on
+      # every other machine, and it fails at load time on hardware nobody has run it
+      # on yet. The candidate is a libc++ reached through -L$LLVM_ROOT/lib, so
+      # libc++ is named on its own row rather than left inside the general check.
+      #
+      # The rule applied: a dependency naming the build machine is a FAIL, a
+      # dependency on a system library or an @rpath entry is a PASS. LLVM is
+      # expected to appear, because DXMT's airconv translates DXBC to AIR and links
+      # LLVM to do it, so the question about LLVM is where it resolves to and not
+      # whether it is there.
+      - name: Dependency audit, read off the binaries
+        # The step that does the audit was the one step in this file without the
+        # environment the audit reads: DXMT_SRC arrived unset, the step said so in
+        # its own output, and then failed on "the build directory is not there" --
+        # which is a true statement about an empty variable and a false statement
+        # about DXMT. The evidence it never produced is the evidence this project
+        # needed, so the variable is now passed the same way every other step gets it.
+        env:
+          DXMT_SRC: ${{ runner.temp }}/dxmt
+        run: |
+          # Probes are allowed to fail here; the verdict below is not. The previous
+          # version ran under `set -euo pipefail` and died on its own first find,
+          # which is why a failed run uploaded an empty dxmt-dependencies.txt and no
+          # reason at all. What was wanted was a FAIL with a reason, and what was
+          # produced was a FAIL with nothing.
+          set -uo pipefail
+          out="$RUNNER_TEMP/dxmt-dependencies.txt"
+          : > "$out"
+          fails=0
+          rows=""
+          row() {
+            rows=$(printf '%s| %s | %s | %s |\n' "$rows" "$1" "$2" "$3")
+            if [ "$2" = "FAIL" ]; then fails=$((fails + 1)); fi
+          }
+
+          # What is being looked at, before looking at anything.
+          {
+            echo "## what this audit is looking at"
+            echo "DXMT_SRC=${DXMT_SRC-<unset>}"
+            echo "LLVM_ROOT=${LLVM_ROOT-<unset>}"
+            echo "build directory: ${DXMT_SRC-}/build"
+            ls -la "${DXMT_SRC-}/build" 2>&1 | head -20
+          } | tee -a "$out"
+
+          if [ -z "${DXMT_SRC-}" ] || [ ! -d "${DXMT_SRC-}/build" ]; then
+            echo "::error title=the DXMT build directory is not there::DXMT_SRC=${DXMT_SRC-<unset>}. Nothing can be audited, so the audit fails rather than reporting an empty table as success."
+            exit 1
+          fi
+
+          dylibs=$(find "$DXMT_SRC/build" -type f -name '*.dylib' 2>/dev/null | sort)
+          if [ -z "$dylibs" ]; then
+            echo "::error title=no dylib was produced to audit::the build directory exists and holds none. There is nothing to audit and that is a failure."
+            exit 1
+          fi
+          count=$(printf '%s\n' "$dylibs" | wc -l | tr -d ' ')
+
+          leaked=0
+          non_arm64=0
+          libcxx="none found"
+          llvm="none found"
+          # Every otool call is allowed to fail. The first version of this step
+          # guarded nothing, so one dylib without an install name killed the step
+          # inside a block whose output went to a file -- which is why a failed run
+          # produced no evidence at all, only a red step. A diagnostic step that
+          # cannot survive the thing it is diagnosing is not a diagnostic step.
+          for dylib in $dylibs; do
+            echo "auditing $dylib"
+            {
+              echo "### $dylib"
+              file "$dylib" || true
+              echo "-- install name:"
+              otool -D "$dylib" 2>&1 | tail -1 || true
+              echo "-- rpaths:"
+              otool -l "$dylib" 2>&1 | grep -A2 LC_RPATH | grep -E 'path ' || echo "(none)"
+              echo "-- dependencies:"
+              otool -L "$dylib" 2>&1 | tail -n +2 || true
+              echo ""
+            } >> "$out" 2>&1 || true
+
+            case "$(file "$dylib")" in
+              *arm64*) ;;
+              *) non_arm64=$((non_arm64 + 1)) ;;
+            esac
+
+            deps=$(otool -L "$dylib" 2>/dev/null | tail -n +2 | awk '{print $1}' || true)
+            # Undefined symbols are the other half of a dependency question: what
+            # this file needs someone else to provide.
+            {
+              echo "-- undefined symbols it needs:"
+              nm -u "$dylib" 2>&1 | head -20 || true
+              echo "-- defined symbols it offers (first 10):"
+              nm -gU "$dylib" 2>&1 | head -10 || true
+            } >> "$out" 2>&1 || true
+            if printf '%s\n' "$deps" | grep -qE '/Users/runner|/private/var/folders|/opt/homebrew'; then
+              leaked=$((leaked + 1))
+            fi
+            if printf '%s\n' "$deps" | grep -q 'libc++'; then
+              libcxx=$(printf '%s\n' "$deps" | grep 'libc++' | sort -u | tr '\n' ' ')
+            fi
+            if printf '%s\n' "$deps" | grep -q 'libLLVM'; then
+              llvm=$(printf '%s\n' "$deps" | grep 'libLLVM' | sort -u | tr '\n' ' ')
+            fi
+          done
+
+          # libc++ is a PASS when every dylib that needs it depends on the system
+          # path. An @rpath/libc++ dependency is not a pass and the previous rule
+          # that accepted it was wrong: the loader only finds it if something ships
+          # a libc++ next to the binary, and nothing in this project ships one. The
+          # per-dylib verdict is kept, because one averaged value hid which library
+          # was the odd one out -- three depended on /usr/lib/libc++.1.dylib and
+          # winemetal.dylib did not.
+          rpath_libcxx=""
+          libcxx_details=""
+          for dylib in $dylibs; do
+            deps_here="$(otool -L "$dylib" 2>/dev/null | tail -n +2 | awk '{print $1}' || true)"
+            here="$(printf '%s\n' "$deps_here" | grep -E 'libc\+\+|libunwind' | sort -u | tr '\n' ' ' || true)"
+            [ -n "$here" ] || continue
+            libcxx_details="$libcxx_details $(basename "$dylib"):$here"
+            case "$here" in
+              *@rpath/libc++*|*@rpath/libunwind*) rpath_libcxx="$rpath_libcxx $(basename "$dylib")" ;;
+            esac
+          done
+          libcxx_state=PASS
+          if [ -n "$rpath_libcxx" ]; then
+            libcxx_state=FAIL
+          fi
+          row "libc++ resolved from the system" "$libcxx_state" "${libcxx_details:-no dylib depends on libc++}"
+          row "No @rpath libc++ or libunwind" \
+              "$([ -z "$rpath_libcxx" ] && echo PASS || echo FAIL)" \
+              "${rpath_libcxx:-no dylib asks the loader to find one beside it}"
+          row "DXMT architecture arm64" \
+              "$([ "$non_arm64" -eq 0 ] && echo PASS || echo FAIL)" \
+              "$count dylibs, $non_arm64 not arm64"
+          row "No build-path dependency" \
+              "$([ "$leaked" -eq 0 ] && echo PASS || echo FAIL)" \
+              "$leaked dylibs name a path from the build machine"
+          row "LLVM dependency" "OBSERVED" "$llvm"
+          # The row used to look in src/winemetal/, and the build puts it in
+          # src/nativemetal/, so it reported FAIL for a file that was there. It is
+          # found rather than predicted, and the path it found is printed.
+          winemetal="$(find "$DXMT_SRC/build" -name 'winemetal.dylib' -print -quit 2>/dev/null)"
+          row "winemetal.dylib present" \
+              "$([ -n "$winemetal" ] && echo PASS || echo FAIL)" \
+              "${winemetal:-no winemetal.dylib anywhere under the build directory}"
+          row "Real Apple Silicon GPU" "REQUIRES HARDWARE" "nothing here executed a GPU operation"
+
+          {
+            echo "## Mr dependency audit, read off the binaries"
+            echo ""
+            echo "| | | |"
+            echo "| --- | --- | --- |"
+            printf '%s' "$rows"
+            echo ""
+            echo "OBSERVED is not a pass: the dependency is there, and where it resolves"
+            echo "to is a decision for the packaging stage rather than for this check."
+          } | tee "$RUNNER_TEMP/dxmt-verification.txt"
+          cat "$RUNNER_TEMP/dxmt-verification.txt" >> "$GITHUB_STEP_SUMMARY"
+          cat "$out"
+
+          if [ "$fails" -gt 0 ]; then
+            echo "::error title=$fails dependency row(s) failed::see dxmt-dependencies.txt"
+            exit 1
+          fi
+
       - name: Is there a GPU to verify against?
         env:
           DXMT_SRC: ${{ runner.temp }}/dxmt
@@ -316,6 +504,8 @@ jobs:
           name: dxmt-build-evidence
           path: |
             ${{ runner.temp }}/dxmt-evidence.txt
+            ${{ runner.temp }}/dxmt-dependencies.txt
+            ${{ runner.temp }}/dxmt-verification.txt
             ${{ runner.temp }}/dxmt-build.log
             ${{ runner.temp }}/dx11-probe.log
             ${{ runner.temp }}/gpu-precondition.log

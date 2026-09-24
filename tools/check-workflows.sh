@@ -26,10 +26,16 @@ if command -v actionlint >/dev/null 2>&1; then
 elif [ -x "$HOME/.local/bin/actionlint" ]; then
   ACTIONLINT="$HOME/.local/bin/actionlint"
 else
-  printf 'check-workflows: no actionlint on PATH, so there is nothing to check with.\n'
+  printf 'check-workflows: no actionlint on PATH, so nothing was checked.\n'
   printf 'check-workflows: install it from https://github.com/rhysd/actionlint/releases\n'
   printf 'check-workflows: at least v1.7, then run this again.\n'
-  exit 0
+  printf 'check-workflows: exiting 1, because a missing checker is not a passing check.\n'
+  printf 'check-workflows: set MR_SKIP_WORKFLOW_CHECK=1 to say you meant to skip it.\n'
+  if [ "${MR_SKIP_WORKFLOW_CHECK:-0}" = 1 ]; then
+    printf 'check-workflows: skipped on request.\n'
+    exit 0
+  fi
+  exit 1
 fi
 
 # shellcheck is left out on purpose: it would be another tool to install, and the

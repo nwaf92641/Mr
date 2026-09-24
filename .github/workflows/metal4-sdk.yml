@@ -1,0 +1,278 @@
+# What Metal 4 on this machine actually is, read out of the SDK rather than
+# remembered.
+#
+# This job does not build Mr. It establishes the two halves of "can this machine
+# do Metal 4", and it keeps them apart because they fail for different reasons:
+#
+#   the SDK declares it        build-time. Without it no Metal 4 name can be
+#                              written in Mr's code at all.
+#   the compiler can use it    build-time, and a different fact from the above.
+#                              A header can be present and not reachable.
+#   the device answers for it  runtime, and a device fact. A header is not a GPU.
+#
+# Anything hardware-shaped ends as REQUIRES HARDWARE rather than FAIL, because a
+# runner without an Apple GPU is not a broken build. Anything SDK-shaped ends as
+# FAIL, because it is a broken build environment and the whole point of this job
+# is to notice that here instead of three layers below.
+
+name: Metal 4 SDK and API surface
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - wine-unix-runtime-metal4
+  pull_request:
+    paths:
+      - 'tests/metal/**'
+      - '.github/workflows/metal4-sdk.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  metal4-sdk:
+    name: Metal 4 SDK and API surface
+    # The image is a verified choice, not a guess. actions/runner-images lists
+    # `macos-26` as the arm64 macOS 26 image, and its readme gives macOS 26.6.1
+    # with Xcode 26.6 (17F113) as the default. The earlier run on macos-15 was
+    # Xcode 16.4 with the macOS 15.5 SDK: no MTL4 header in Metal.framework and no
+    # __MAC_26 in AvailabilityVersions.h, so on that image no Metal 4 code
+    # compiles and this job could not do its job.
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Which Xcode, which SDK, and does this job's premise hold
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          echo "sdk path: $sdk"
+          sdk_major=$(xcrun --sdk macosx --show-sdk-version | cut -d. -f1)
+
+          {
+            echo "## xcode"
+            xcodebuild -version
+            echo "## sdk version"
+            xcrun --sdk macosx --show-sdk-version
+            echo "## sdk path"
+            echo "$sdk"
+            echo "## the SDK's own view of macOS 26"
+            grep -E 'define __MAC_26|define __MAC_OS_X_VERSION_MAX_ALLOWED' \
+              "$sdk/usr/include/AvailabilityVersions.h" 2>/dev/null \
+              || echo "not found in AvailabilityVersions.h"
+          } | tee "$RUNNER_TEMP/xcode-and-sdk.txt"
+
+          # Below 26 there is nothing for the rest of this job to find, and that is
+          # the environment being wrong rather than any kind of hardware limit.
+          if [ "$sdk_major" -lt 26 ]; then
+            echo "::error title=this job needs the macOS 26 SDK::the image provides SDK $sdk_major, so no Metal 4 name can be compiled here. It is not a hardware limitation and it is not a pass."
+            exit 1
+          fi
+          echo "sdk_major=$sdk_major" >> "$GITHUB_ENV"
+
+      - name: The SDK's Metal 4 declarations, verbatim
+        run: |
+          set -euo pipefail
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          METAL="$sdk/System/Library/Frameworks/Metal.framework/Headers"
+          out="$RUNNER_TEMP/metal4-sdk-headers.txt"
+
+          {
+            echo "## Metal.framework headers matching MTL4"
+            ls "$METAL" | grep -E '^MTL4' || echo "(none)"
+          } > "$out"
+
+          found=0
+          for h in "$METAL"/MTL4*.h; do
+            [ -e "$h" ] || continue
+            found=$((found + 1))
+            {
+              echo ""
+              echo "### $(basename "$h")"
+              echo "## availability, verbatim:"
+              grep -m3 -E 'API_AVAILABLE|API_UNAVAILABLE' "$h" || true
+              echo "## interfaces and protocols declared:"
+              # A header that declares no Objective-C interface -- several MTL4
+              # headers are structs and enums -- made this grep fail, and under
+              # set -e with pipefail that killed the step in the middle of the
+              # listing. The measurement then never ran, and the verdict reported
+              # "compiler cannot see Metal 4" from a step that had not executed.
+              # A probe that cannot return "nothing here" is a probe that lies.
+              grep -oE '@(interface|protocol|class) +[A-Za-z0-9_]+' "$h" | sort -u || true
+            } >> "$out"
+          done
+
+          echo "MTL4 headers found: $found"
+          head -60 "$out"
+
+          # On an image that advertises the macOS 26 SDK, no MTL4 header means the
+          # premise of this job does not hold there either, and it is a failure.
+          if [ "$found" -eq 0 ]; then
+            echo "::error title=the macOS 26 SDK declares no MTL4 headers::this job exists to read the Metal 4 surface out of the SDK, and there is none to read on this image."
+            exit 1
+          fi
+
+      # Presence of a header is not reachability by a compiler. The name used here
+      # is extracted from the SDK header at run time, so this cannot be right by
+      # accident: if the extraction finds nothing, the step fails rather than
+      # compiling a file that says nothing.
+      # Presence of a header is not reachability by a compiler.
+      #
+      # The first version of this step read the first header alphabetically --
+      # MTL4AccelerationStructure.h -- and generated a file against it. It then
+      # reported "the compiler cannot see Metal 4" when what had happened was that
+      # one complex header does not compile on its own. That is a wrong answer with
+      # a confident sentence, which is worse than no answer, so each header is tried
+      # by itself and the result is per header.
+      #
+      # The names on the required list are not invented: they are read out of the
+      # SDK's own listing in the step above, and each is a header Mr's command path
+      # needs. A header that fails and is not on that list is recorded and does not
+      # fail the job -- acceleration structures are a Metal 4 feature Direct3D 11
+      # does not have, so a standalone-include quirk there says nothing about this
+      # project's path.
+      - name: Can the compiler see Metal 4, not just find it
+        run: |
+          set -euo pipefail
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          METAL="$sdk/System/Library/Frameworks/Metal.framework/Headers"
+          out="$RUNNER_TEMP/metal4-compiler-visibility.txt"
+          : > "$out"
+
+          # What the command path needs, by name, and why each one is on the list.
+          required="MTL4CommandQueue.h MTL4CommandBuffer.h MTL4CommandAllocator.h MTL4CommandEncoder.h MTL4RenderCommandEncoder.h MTL4ArgumentTable.h MTL4Compiler.h"
+
+          seen=0
+          failed_required=""
+          for h in $(ls "$METAL" | grep -E '^MTL4.*\.h$' | sort); do
+            seen=$((seen + 1))
+            type=$(awk '/@interface[ \t]+MTL4/ {
+                           for (i = 1; i <= NF; i++)
+                             if ($i ~ /^MTL4[A-Za-z0-9_]*$/) { print $i; exit }
+                         }' "$METAL/$h")
+            generated="$RUNNER_TEMP/gen_$h.m"
+            {
+              echo "// Generated from $METAL/$h at run time; the type name below was"
+              echo "// read out of that header rather than remembered."
+              echo "#import <Metal/$h>"
+              if [ -n "$type" ]; then
+                echo "int main(void) { $type *value = nil; (void)value; return 0; }"
+              else
+                echo "int main(void) { return 0; }"
+              fi
+            } > "$generated"
+
+            if clang -fobjc-arc -fmodules -fsyntax-only -framework Metal \
+                 "$generated" >> "$out" 2>&1; then
+              echo "compiles: yes $h (type ${type:-none declared})" | tee -a "$out"
+            else
+              echo "compiles: no  $h (type ${type:-none declared})" | tee -a "$out"
+              case " $required " in
+                *" $h "*) failed_required="$failed_required $h" ;;
+              esac
+            fi
+          done
+
+          echo "headers tested: $seen"
+          if [ -n "$failed_required" ]; then
+            echo "compiler_metal4=no" >> "$GITHUB_ENV"
+            echo "::error title=the compiler cannot use a header the command path needs::$failed_required"
+            exit 1
+          fi
+          echo "compiler_metal4=yes" >> "$GITHUB_ENV"
+          echo "every header required by the command path compiles"
+
+      - name: The runtime half, which is a device fact
+        run: |
+          set -euo pipefail
+          # Compiled here rather than through the project's CMake on purpose, so
+          # that "the SDK does not have Metal 4" and "Mr does not build" stay
+          # different answers.
+          clang -fobjc-arc -fmodules -Wno-deprecated-declarations \
+            -framework Foundation -framework Metal \
+            tests/metal/metal4_sdk_probe.m -o "$RUNNER_TEMP/metal4_probe"
+
+          set +e
+          "$RUNNER_TEMP/metal4_probe" | tee "$RUNNER_TEMP/metal4-probe.txt"
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "probe exit status: $rc"
+          case "$rc" in
+            0|77) ;;
+            *)
+              echo "::error title=the Metal 4 probe did not run::exit status $rc"
+              exit 1
+              ;;
+          esac
+
+      # The verdict, and the only place this job decides anything. SDK and compiler
+      # rows are this job's responsibility and fail it; the device row is hardware
+      # and says so. The exit status follows the rows that are this job's to get
+      # right, so a table that says FAIL cannot be attached to a green job.
+      - name: Verdict
+        if: always()
+        run: |
+          set -euo pipefail
+          sdk=$(xcrun --sdk macosx --show-sdk-path)
+          METAL="$sdk/System/Library/Frameworks/Metal.framework/Headers"
+
+          fails=0
+          rows=""
+          row() {
+            rows=$(printf '%s| %s | %s | %s |\n' "$rows" "$1" "$2" "$3")
+            if [ "$2" = "FAIL" ]; then fails=$((fails + 1)); fi
+          }
+
+          sdk_major=$(xcrun --sdk macosx --show-sdk-version | cut -d. -f1)
+          headers=$(ls "$METAL" 2>/dev/null | grep -cE '^MTL4' || true)
+          compiler="${compiler_metal4:-no}"
+          runtime=$(grep -m1 '^metal4_available=' "$RUNNER_TEMP/metal4-probe.txt" 2>/dev/null | cut -d= -f2 || echo "unknown")
+          gpu=$(grep -m1 '^real_apple_gpu=' "$RUNNER_TEMP/metal4-probe.txt" 2>/dev/null | cut -d= -f2 || echo "unknown")
+
+          row "macOS SDK version" "$([ "$sdk_major" -ge 26 ] && echo PASS || echo FAIL)" "$sdk_major"
+          row "Metal 4 SDK headers" "$([ "${headers:-0}" -gt 0 ] && echo PASS || echo FAIL)" "${headers:-0} headers"
+          row "Metal 4 compiler visibility" "$([ "$compiler" = yes ] && echo PASS || echo FAIL)" "$compiler"
+          row "Real Apple Silicon GPU" "$([ "$gpu" = yes ] && echo PASS || echo "REQUIRES HARDWARE")" "$gpu"
+          row "Metal 4 runtime API" \
+              "$([ "$gpu" = yes ] && { [ "$runtime" = yes ] && echo PASS || echo FAIL; } || echo "REQUIRES HARDWARE")" \
+              "$runtime"
+          row "Metal 4 command path" "NOT IMPLEMENTED" "no MTL4 command has been executed"
+          row "Metal 4 shader path" "NOT IMPLEMENTED" "moved with D3D11 to DXMT"
+          row "Metal 4 pipeline path" "NOT IMPLEMENTED" "moved with D3D11 to DXMT"
+          row "Metal 3 fallback" "DISABLED" "mr_host_pick_backend returns Metal 4 or nothing"
+
+          {
+            echo "## Mr verification, Metal 4 SDK and API surface"
+            echo ""
+            echo "| | | |"
+            echo "| --- | --- | --- |"
+            printf '%s' "$rows"
+            echo ""
+            echo "FAIL on an SDK row is this job failing. REQUIRES HARDWARE is the runner"
+            echo "having no Apple GPU, which is a fact about the machine and not a pass."
+            echo "Compiling a file that names a type is not executing anything."
+          } | tee "$RUNNER_TEMP/metal4-verification.txt"
+          cat "$RUNNER_TEMP/metal4-verification.txt" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$fails" -gt 0 ]; then
+            echo "::error title=$fails Metal 4 row(s) failed::see metal4-verification.txt"
+            exit 1
+          fi
+
+      - name: Upload Metal 4 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metal4-sdk-evidence
+          path: |
+            ${{ runner.temp }}/xcode-and-sdk.txt
+            ${{ runner.temp }}/metal4-sdk-headers.txt
+            ${{ runner.temp }}/metal4-compiler-visibility.txt
+            ${{ runner.temp }}/metal4-probe.txt
+            ${{ runner.temp }}/metal4-verification.txt
+          if-no-files-found: error

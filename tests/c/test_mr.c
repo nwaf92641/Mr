@@ -749,7 +749,7 @@ static void test_host_jit_pool_sizing(void) {
 }
 
 static void test_host_backend_selection(void) {
-  mr_test_begin("host: Metal 4 preferred, Metal 3 fallback");
+  mr_test_begin("host: Metal 4 is the target, and there is no silent fallback");
   g_failures = 0;
 
   mr_host_caps caps;
@@ -764,13 +764,27 @@ static void test_host_backend_selection(void) {
   CHECK_INT(mr_host_pick_backend(&caps, true, &reason), MR_BACKEND_METAL4);
   CHECK(reason != NULL);
 
+  /*
+   * Metal 4 gone and Metal 3 still present. Nothing is selected. Mr's graphics
+   * target is Metal 4 and a Metal 3 frame path is not a runtime path here, so this
+   * is the check that fails if a fallback is ever reintroduced -- which is exactly
+   * why it asserts the refusal and the sentence that carries it.
+   */
   caps.metal4_available = false;
-  CHECK_INT(mr_host_pick_backend(&caps, true, &reason), MR_BACKEND_METAL3);
-  CHECK(reason != NULL && reason[0] != '\0');
+  const char *no_metal4 = NULL;
+  CHECK_INT(mr_host_pick_backend(&caps, true, &no_metal4), MR_BACKEND_NONE);
+  CHECK(no_metal4 != NULL);
+  CHECK(strstr(no_metal4, "UNSUPPORTED TARGET") != NULL);
+  CHECK(strstr(no_metal4, "Metal 3 is not a runtime path") != NULL);
 
-  /* Explicitly refused by the profile. */
+  /* Disabled in the profile, with Metal 4 present on the device. */
   caps.metal4_available = true;
-  CHECK_INT(mr_host_pick_backend(&caps, false, &reason), MR_BACKEND_METAL3);
+  const char *refused = NULL;
+  CHECK_INT(mr_host_pick_backend(&caps, false, &refused), MR_BACKEND_NONE);
+  CHECK(refused != NULL);
+  CHECK(strstr(refused, "UNSUPPORTED TARGET") != NULL);
+  /* A profile choice and a device limitation are different sentences. */
+  CHECK(refused != no_metal4);
 
   /* No GPU at all. */
   caps.gpu_available = false;
@@ -794,10 +808,22 @@ static void test_host_backend_selection(void) {
   CHECK(no_family != NULL);
   CHECK(strcmp(no_device, no_family) != 0);
 
-  /* An Apple Silicon device without Metal 4 is still usable. */
+  /*
+   * A real Apple GPU whose OS predates Metal 4. It still gets no backend, and the
+   * reason names the operating system rather than the driver, because that is the
+   * thing the reader can change. It must not be the same sentence as "the device
+   * refused Metal 4", which no update fixes.
+   */
   caps.gpu_available = true;
   caps.metal3_available = true;
-  CHECK_INT(mr_host_pick_backend(&caps, true, &reason), MR_BACKEND_METAL3);
+  caps.metal4_available = false;
+  snprintf(caps.os_version, sizeof(caps.os_version), "15.6");
+  const char *too_old = NULL;
+  CHECK_INT(mr_host_pick_backend(&caps, true, &too_old), MR_BACKEND_NONE);
+  CHECK(too_old != NULL);
+  CHECK(too_old != no_metal4);
+  CHECK(strstr(too_old, "predates Metal 4") != NULL);
+  CHECK(strstr(too_old, "UNSUPPORTED TARGET") != NULL);
 
   /*
    * A device that is present, supports Metal 3, and is not an Apple GPU: the
@@ -818,7 +844,9 @@ static void test_host_backend_selection(void) {
   caps.real_apple_gpu = true;
   caps.metal4_available = false;
   CHECK(mr_host_describe_graphics(&caps, report, sizeof(report)) > 0);
-  CHECK(strstr(report, mr_backend_str(MR_BACKEND_METAL3)) != NULL);
+  /* Metal 4 is the target, so a device without it is told there is no path. */
+  CHECK(strstr(report, mr_backend_str(MR_BACKEND_NONE)) != NULL);
+  CHECK(strstr(report, "no Metal 3 runtime path") != NULL);
   CHECK(strstr(report, "recommended path") != NULL);
 
   caps.real_apple_gpu = false;
@@ -1138,7 +1166,7 @@ static void test_plan_omits_hardware_path_for_native_arm64(void) {
 }
 
 static void test_plan_profile_override_wins(void) {
-  mr_test_begin("planner: a profile setting changes the outcome");
+  mr_test_begin("planner: a profile cannot bring back a Metal 3 path");
   g_failures = 0;
 
   char path[512];
@@ -1168,22 +1196,31 @@ static void test_plan_profile_override_wins(void) {
   mr_launch_plan plan;
   CHECK(mr_plan_build(&facts, &profile, &host, &layout, &plan) == MR_OK);
   CHECK_INT(plan.d3d_feature_level, 1101);
-  CHECK_INT(plan.backend, MR_BACKEND_METAL3);
+  /*
+   * The profile asked for a Metal 3 backend and there is none, so nothing is
+   * selected and the graphics path is reported as unavailable. A profile setting
+   * whose only possible effect is this refusal still has an effect, and it is
+   * visible here rather than being absorbed into a healthy-looking plan.
+   */
+  CHECK_INT(plan.backend, MR_BACKEND_NONE);
+  CHECK(!plan.graphics_enabled);
   CHECK_INT((long long)plan.jit_pool_bytes, 512ll * 1024 * 1024);
 
-  /* The plan must render in both forms. */
+  /* The plan must render in both forms, and both must carry the sentence. */
   mr_str text;
   CHECK(mr_str_init(&text) == MR_OK);
   CHECK(mr_plan_to_text(&plan, &text) == MR_OK);
   CHECK(text.len > 0);
-  CHECK(strstr(text.data, "metal3") != NULL);
+  CHECK(strstr(text.data, "graphics.backend") != NULL);
+  CHECK(strstr(text.data, "UNSUPPORTED TARGET") != NULL);
   mr_str_free(&text);
 
   mr_str json;
   CHECK(mr_str_init(&json) == MR_OK);
   CHECK(mr_plan_to_json(&plan, &json) == MR_OK);
-  CHECK(strstr(json.data, "\"backend\": \"metal3\"") != NULL);
-  CHECK(strstr(json.data, "\"blockers\": []") != NULL);
+  CHECK(strstr(json.data, "\"backend\": \"none\"") != NULL);
+  CHECK(strstr(json.data, "\"blockers\": []") == NULL);
+  CHECK(strstr(json.data, "no graphics target") != NULL);
   mr_str_free(&json);
 
   mr_plan_free(&plan);

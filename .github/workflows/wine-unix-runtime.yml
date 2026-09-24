@@ -1,0 +1,733 @@
+# The half of Wine the PE workflow does not build: the Unix side.
+#
+# The PE workflow builds d3d11.dll, dxgi.dll and d3dcompiler_47.dll and stops
+# there, because that is what it was written to establish. A DLL that was built is
+# not a DLL that was loaded, and loading needs the loader, ntdll's unix half,
+# win32u.so and wineserver -- host-native arm64 code, since the PE side being
+# aarch64/arm64ec does not make the Unix side anything other than the host.
+#
+# So this workflow builds those and then tries to use them. What it can reach is
+# not assumed in advance: each step records what exists, and the last one says
+# plainly whether a PE module was loaded or not.
+#
+# The setup steps are the same as the PE workflow's, and they are deliberately not
+# shared yet. The PE pipeline is verified and this one is not, and refactoring a
+# verified pipeline in the same change as debugging an unverified one is how a
+# working thing stops working for reasons nobody can see. That moves to a shared
+# setup the moment this workflow is green.
+
+name: Wine Unix runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - wine-arm64ec-dxmt
+      - wine-unix-runtime-metal4
+  pull_request:
+    paths:
+      - 'third_party/wine.lock'
+      - 'tests/wine/**'
+      - '.github/workflows/wine-unix-runtime.yml'
+
+permissions:
+  contents: read
+
+env:
+  MINGW_VERSION: '20260908'
+
+jobs:
+  wine-unix-runtime:
+    name: Wine Unix runtime
+    runs-on: macos-15
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Paths
+        run: |
+          {
+            echo "WINE_SRC=$GITHUB_WORKSPACE/third_party/wine/src"
+            echo "WINE_BUILD=$GITHUB_WORKSPACE/third_party/wine/src/build-arm64ec"
+            echo "RUNNER_TEMP=$RUNNER_TEMP"
+            echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+          } >> "$GITHUB_ENV"
+
+      - name: Toolchain, recorded
+        run: |
+          set -euo pipefail
+          sw_vers
+          brew install bison flex pkg-config
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          export PATH="$(brew --prefix bison)/bin:$PATH"
+          bison --version | head -1
+
+      - name: llvm-mingw, with the aarch64 and arm64ec targets
+        run: |
+          set -euo pipefail
+          asset="llvm-mingw-${MINGW_VERSION}-ucrt-macos-universal.tar.xz"
+          url="https://github.com/mstorsjo/llvm-mingw/releases/download/${MINGW_VERSION}/${asset}"
+          curl -fsSL "$url" -o "$RUNNER_TEMP/$asset"
+          tar -xf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP"
+          root="$RUNNER_TEMP/llvm-mingw-${MINGW_VERSION}-ucrt-macos-universal"
+          echo "MINGW_ROOT=$root" >> "$GITHUB_ENV"
+          for tool in aarch64-w64-mingw32-clang arm64ec-w64-mingw32-clang; do
+            test -x "$root/bin/$tool" || {
+              echo "::error::llvm-mingw $MINGW_VERSION has no $tool"
+              exit 1
+            }
+            echo "$tool: yes"
+          done
+          "$root/bin/aarch64-w64-mingw32-clang" --version | head -1
+
+      - name: Fetch Wine at the pinned commit
+        run: |
+          set -euo pipefail
+          commit=$(grep -E '^commit ' third_party/wine.lock | head -1 | cut -d= -f2 | tr -d ' ')
+          test -n "$commit" || { echo "::error::no commit in third_party/wine.lock"; exit 1; }
+          mkdir -p third_party/wine/src
+          cd third_party/wine/src
+          git init -q
+          git remote add origin https://github.com/wine-mirror/wine
+          git fetch -q --depth 1 origin "$commit"
+          git checkout -q FETCH_HEAD
+          echo "checked out $(git rev-parse HEAD)"
+          echo "commit=$commit" >> "$GITHUB_ENV"
+
+      # The one change to Wine this stage needs, applied where Wine is built.
+      #
+      # A patch that does not apply fails the job. A build that quietly continues
+      # unpatched would report the same failure as before and give no way to tell
+      # "the fix does not work" from "the fix is not in the tree", which is the
+      # distinction every run in this stage has had to pay for.
+      - name: Patch Wine for the arm64 address space
+        run: |
+          set -euo pipefail
+          cd "$WINE_SRC"
+          patch_file="$GITHUB_WORKSPACE/patches/wine/0001-arm64-shared-user-data.patch"
+          test -f "$patch_file" || {
+            echo "::error title=the patch file is missing::patches/wine/0001-arm64-shared-user-data.patch"
+            exit 1
+          }
+          echo "--- the line the patch is written against:"
+          grep -n 'user_shared_data = (void \*)0x7ffe0000;' dlls/ntdll/unix/virtual.c || echo "(not found, the tree may be a different revision)"
+
+          applied=no
+          for how in "git apply -p1" "git apply -3 -p1" "patch -p1 -F3"; do
+            if $how "$patch_file" >> "$RUNNER_TEMP/wine-patch.log" 2>&1; then
+              applied=yes
+              echo "applied with: $how"
+              break
+            fi
+            echo "$how did not apply" >> "$RUNNER_TEMP/wine-patch.log"
+            git checkout -- dlls/ntdll/unix/virtual.c 2>/dev/null || true
+          done
+          if [ "$applied" = no ]; then
+            echo "::error title=the Wine patch did not apply::this tree is not the revision the patch was written against, and continuing would build unpatched Wine while reporting the fix as present. See wine-patch.log."
+            cat "$RUNNER_TEMP/wine-patch.log" || true
+            exit 1
+          fi
+
+          # Applied is not the same as changed. The marker is what the build will
+          # compile; without it the source is untouched whatever the patch tool said.
+          if ! grep -q 'defined(__APPLE__) && defined(__aarch64__)' dlls/ntdll/unix/virtual.c; then
+            echo "::error title=the patch reported success and the source has no arm64 branch::nothing was changed."
+            exit 1
+          fi
+          echo "--- the source now carries:"
+          grep -n -A2 'defined(__APPLE__) && defined(__aarch64__)' dlls/ntdll/unix/virtual.c | head -24
+
+      - name: configure
+        run: |
+          set -euo pipefail
+          export PATH="$MINGW_ROOT/bin:$PATH"
+          mkdir -p "$WINE_BUILD"
+          cd "$WINE_BUILD"
+          # aarch64 and arm64ec for the PE side; x86_64 as the extra arch arm64ec
+          # requires. The Unix side is host-native arm64 either way.
+          "$WINE_SRC/configure" \
+            --enable-archs=aarch64,arm64ec,x86_64 \
+            --without-alsa --without-capi --without-coreaudio --without-cups \
+            --without-dbus --without-fontconfig --without-freetype \
+            --without-gnutls --without-gssapi --without-hal \
+            --without-krb5 --without-netapi --without-opencl \
+            --without-openssl --without-oss --without-pcap --without-pulse \
+            --without-sane --without-sdl --without-udev --without-usb \
+            --without-v4l2 --without-vulkan --without-wayland \
+            --without-x --without-xcursor --without-xfixes --without-xi2 \
+            --without-xinerama --without-xinput --without-xinput2 \
+            --without-xrandr --without-xrender --without-xshape \
+            --without-xshm --without-xcomposite --without-xkb \
+            > "$RUNNER_TEMP/wine-unix-configure.log" 2>&1 || {
+            echo "::error title=configure failed::see wine-unix-configure.log"
+            tail -30 "$RUNNER_TEMP/wine-unix-configure.log"
+            exit 1
+          }
+          tail -5 "$RUNNER_TEMP/wine-unix-configure.log"
+
+      # The Unix side, target by target, smallest first and for the same reason as
+      # on the PE side: a failure at the loader and a failure at wineserver are
+      # different problems and the log should say which one happened first.
+      - name: Build the Unix side
+        run: |
+          set -euo pipefail
+          export PATH="$MINGW_ROOT/bin:$PATH"
+          cd "$WINE_BUILD"
+          ncpu=$(sysctl -n hw.ncpu)
+          log="$RUNNER_TEMP/wine-unix-build.log"
+          : > "$log"
+          : > "$RUNNER_TEMP/wine-unix-plan.txt"
+
+          # nls is here because Wine's processes and the server load locale data from
+          # it, and a run without it stops at
+          #   err:environ:read_nls_file failed to load .../nls/normnfc.nls
+          #   wineserver: failed to load l_intl.nls
+          # before the program under test is reached at all.
+          for target in dlls/ntdll dlls/win32u loader server nls; do
+            if [ ! -f "$target/Makefile" ]; then
+              echo "$target: no generated Makefile, skipped" | tee -a "$RUNNER_TEMP/wine-unix-plan.txt"
+              continue
+            fi
+            echo "$target: make -C $target" | tee -a "$RUNNER_TEMP/wine-unix-plan.txt"
+            make -C "$target" -j"$ncpu" >> "$log" 2>&1 || {
+              echo "::error title=the Unix side failed at $target::see wine-unix-build.log"
+              tail -30 "$log"
+              exit 1
+            }
+          done
+
+          echo "--- what the Unix side produced ---"
+          find loader server dlls/ntdll dlls/win32u \
+            \( -name '*.so' -o -name 'wine' -o -name 'wine64' -o -name 'wineserver' \
+               -o -name '*.dylib' \) \
+            2>/dev/null | sort | tee "$RUNNER_TEMP/wine-unix-files.txt"
+
+          # The loader is linked for a 4KB page machine and this one is 16KB:
+          # __PAGEZERO vmsize 0x1000, __TEXT at 0x1000, hw.pagesize 16384. wineserver,
+          # which runs and prints its version, has a 4GB pagezero and __TEXT at
+          # 0x100000000. The kernel refuses the 4KB mapping silently and at once,
+          # which is exactly what the runs show: Killed: 9, nothing on any channel,
+          # nothing from dyld.
+          #
+          # Two earlier attempts to change that were void, and this is the part worth
+          # remembering: `make -C loader WINELOADER_LDFLAGS=...` produced a binary
+          # with the same sha256 for four different flag sets, so the flags were not
+          # reaching the linker and "every variant dies" meant the variable had not
+          # changed rather than that it had been tested.
+          #
+          # So the flags are changed where they were written -- in the generated
+          # makefiles -- rather than through the variable that was assumed to carry
+          # them, and the relink has to prove itself: the layout and the hash are
+          # printed before and after, and a relink that changes neither fails this
+          # step. A rebuild that did not rebuild is not an experiment.
+          layout_of() {
+            otool -l "$1" 2>/dev/null | awk '
+              /segname/ { seg = $2 }
+              /vmaddr/ { vm = $2 }
+              /vmsize/ { if (seg == "__PAGEZERO") { if (!p) p = vm; ps = $2 }
+                         if (seg == "__TEXT" && !t) { tv = vm; t = 1 } }
+              END { print "pagezero=" p " size=" ps " text=" tv }'
+          }
+
+          echo "--- where the linker flags are written"
+          grep -rn 'pagezero_size\|segalign' Makefile Make.rules loader/Makefile 2>/dev/null | head -20 \
+            || echo "not in Makefile, Make.rules or loader/Makefile"
+
+          cp -p loader/wine loader/wine-configured
+          old_layout="$(layout_of loader/wine)"
+          old_hash="$(shasum -a 256 loader/wine | cut -c1-12)"
+
+          for f in Makefile Make.rules loader/Makefile; do
+            [ -f "$f" ] || continue
+            if grep -q 'pagezero_size,0x1000' "$f" 2>/dev/null; then
+              sed 's/-pagezero_size,0x1000/-pagezero_size,0x4000/g; s/-segalign,0x1000/-segalign,0x4000/g' "$f" > "$f.patched" \
+                && mv "$f.patched" "$f"
+              echo "patched $f: 0x1000 -> 0x4000"
+            fi
+          done
+
+          echo "--- the flags now read"
+          grep -rn 'pagezero_size\|segalign' Makefile loader/Makefile 2>/dev/null | head -8 || echo "gone"
+
+          rm -f loader/wine
+          if make -C loader -j"$ncpu" > loader-relink.log 2>&1; then
+            echo "relinked"
+          else
+            echo "the relink failed; see loader-relink.log"
+            tail -15 loader-relink.log || true
+          fi
+
+          new_layout="$(layout_of loader/wine)"
+          new_hash="$(shasum -a 256 loader/wine | cut -c1-12)"
+          echo "--- before: $old_layout sha256=$old_hash"
+          echo "--- after:  $new_layout sha256=$new_hash"
+          if [ "$old_layout" = "$new_layout" ]; then
+            echo "::error title=the relink did not change the layout::pagezero and __TEXT are unchanged after patching the flags, so the loader was not relinked with a 16KB layout and this is not a test of anything."
+            exit 1
+          fi
+          echo "the layout changed, so the new flags reached the linker"
+
+          # The comparison that matters is with wineserver, which runs:
+          #
+          #   loader/wine   __PAGEZERO 0x4000   __TEXT at 0x4000        Killed: 9
+          #   wineserver    __PAGEZERO 4GB      __TEXT at 0x100000000   runs
+          #
+          # Both are adhoc linker-signed, codesign accepts both, and neither is the
+          # difference. The difference is where the image sits: this loader is linked
+          # to live near address zero, and every other executable on this machine
+          # lives at a 4GB PIE base. Wine's -segalign and -pagezero_size flags exist to
+          # match the preloader's reserved areas, and the preloader is not used on
+          # 64-bit.
+          #
+          # Every earlier attempt to test this was void because the flags live in the
+          # generated Makefile and `make -C loader WINELOADER_LDFLAGS=...` never
+          # changed the link line: four flag sets produced one sha256. They are
+          # removed where they are written now, and the relink has to change the hash
+          # or this step fails.
+          echo "--- removing every custom link flag from the generated Makefile"
+          before_refs=$(grep -c 'pagezero_size\|segalign\|__info_plist' Makefile 2>/dev/null || echo 0)
+          sed -e 's|,-segalign,0x1000||g' -e 's|,-segalign,0x4000||g' \
+              -e 's|,-pagezero_size,0x1000||g' -e 's|,-pagezero_size,0x4000||g' \
+              -e 's|,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist||g' \
+              Makefile > Makefile.clean && mv Makefile.clean Makefile
+          after_refs=$(grep -c 'pagezero_size\|segalign\|__info_plist' Makefile 2>/dev/null || echo 0)
+          echo "references in the link line: $before_refs before, $after_refs after"
+
+          # The flags stay removed and the reason is measured, not assumed: setting
+          # WINELOADER_LDFLAGS to -Wl,-segalign,0x4000,-pagezero_size,0x4000 changed
+          # the hash of the relinked loader and left its layout exactly as it was, so
+          # the variable does not reach the link line. The layout that runs is the
+          # default one, and the previous run measured what it costs --
+          #   --- no low-address flags: pagezero=0x0 size=0x0000000100000000 text=0x100000000
+          #   mach ret 1 (KERN_INVALID_ADDRESS) at 0x100000000-0x100030000
+          #   arm64 set_vprot: mprotect to 0x1 failed for 0x140000000-0x140001000,
+          #   errno 13 (Permission denied)
+          # 0x140000000 is the load test's own ImageBase. Changing the layout is not
+          # the fix: a small pagezero is a loader this kernel kills at launch, which an
+          # earlier run in this workflow wrote down. The window the default layout puts
+          # around the ImageBase is registered inside Wine instead, by
+          # add_main_image_reserved_area() in the patch, which reads the executable's
+          # own header. The ERR line it prints and the probe below are the numbers.
+          for mk in Makefile loader/Makefile; do
+            [ -f "$mk" ] || continue
+            if grep -q '^WINELOADER_LDFLAGS' "$mk"; then
+              sed -i '' -e 's|^WINELOADER_LDFLAGS *=.*$|WINELOADER_LDFLAGS =|' "$mk"
+              echo "--- $mk: $(grep -m1 '^WINELOADER_LDFLAGS' "$mk")"
+            fi
+          done
+
+          rm -f loader/wine
+          make -C loader -j"$ncpu" > loader-relink.log 2>&1 || {
+            tail -10 loader-relink.log
+            exit 1
+          }
+
+          noflags_layout="$(layout_of loader/wine)"
+          noflags_hash="$(shasum -a 256 loader/wine | cut -c1-12)"
+          echo "--- no low-address flags: $noflags_layout sha256=$noflags_hash"
+          if [ "$noflags_hash" = "$new_hash" ]; then
+            echo "::error title=removing the flags changed nothing::the flags are not in this link line, so the layout cannot be changed from here and this is not a test."
+          fi
+          cp -p loader/wine loader/wine-noflags
+
+          # The previous probes did not compile and the reason was suppressed by the
+          # 2>/dev/null that was meant to keep the log tidy. A probe whose failure
+          # cannot be read is worse than no probe.
+          echo "--- clang, with its errors shown this time"
+          clang --version 2>&1 | head -1 || echo "clang is not on PATH"
+          printf '#include <stdio.h>\nint main(void) { printf("linked and ran\\n"); return 0; }\n' > probe.c
+          if clang probe.c -o probe_plain; then
+            ./probe_plain > probe.out 2>&1
+            echo "probe_plain status=$? output=$(head -1 probe.out)"
+          else
+            echo "clang could not link a trivial program, see the error above"
+          fi
+
+          # Which name Wine gave the loader, read off the disk instead of assumed.
+          # The earlier run checked loader/wine64 only, found nothing, and reported
+          # success, which made "the loader is missing" look like "there was nothing
+          # to start". A missing loader is a prerequisite failing: without it no
+          # module can be loaded and the stage cannot proceed.
+          loader=""
+          for candidate in loader/wine loader/wine64; do
+            if [ -x "$candidate" ]; then
+              echo "loader produced: $candidate"
+              file "$candidate"
+              loader="$candidate"
+              break
+            fi
+            echo "loader candidate absent: $candidate"
+          done
+          if [ -z "$loader" ]; then
+            echo "::error title=no Wine loader was produced::neither loader/wine nor loader/wine64 exists after building the loader target, so nothing downstream can run. This is a failure and not a skip."
+            ls -la loader 2>/dev/null | head -20 || true
+            exit 1
+          fi
+          echo "WINE_LOADER=$loader" >> "$GITHUB_ENV"
+
+      - name: What the loader is, as a binary
+        run: |
+          set -euo pipefail
+          cd "$WINE_BUILD"
+          out="$RUNNER_TEMP/wine-loader-binary.txt"
+          : > "$out"
+          for f in loader/wine64 loader/wine server/wineserver dlls/ntdll/ntdll.so \
+                   dlls/win32u/win32u.so; do
+            {
+              echo "### $f"
+              if [ -e "$f" ]; then
+                file "$f"
+                echo "-- dependencies:"
+                otool -L "$f" 2>/dev/null || echo "(otool could not read it)"
+                echo "-- architecture:"
+                lipo -archs "$f" 2>/dev/null || true
+              else
+                echo "not built"
+              fi
+              echo ""
+            } >> "$out"
+          done
+          cat "$out"
+
+      # The first thing a Unix runtime has to do is start. This is the lowest
+      # honest bar and it is a different claim from "Wine can run a title".
+      # Where the loader stops, answered with a trace rather than a timeout.
+      #
+      # `loader/wine --version` printed nothing and was still running at 300
+      # seconds. A process that has produced no output is blocked before its first
+      # line, and the answer is in the kernel or in the loader's own startup rather
+      # than in anything Wine would have printed. So it is run for 30 seconds at a
+      # time in five configurations, and while it is stuck ps, lsof and sample(1)
+      # record where it is. ps, lsof and sample run with the process alive, which is
+      # the only moment they are worth anything.
+      #
+      # This step fails when the loader does not return, on purpose: the load test
+      # below cannot mean anything without it, and a skipped test is honest where a
+      # green one is not.
+      - name: Where the loader stops
+        run: |
+          set -euo pipefail
+          diag="$RUNNER_TEMP/loader-diag"
+          mkdir -p "$diag"
+          set +e
+          sh "$GITHUB_WORKSPACE/tests/wine/loader_diagnose.sh" "$WINE_LOADER" "$WINE_BUILD" "$diag"
+          rc=$?
+          set -e
+          echo "diagnose exit status: $rc"
+          for f in "$diag"/*.txt; do
+            [ -e "$f" ] || continue
+            echo "===== $(basename "$f")"; sed -n '1,40p' "$f"
+          done
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=the Wine loader did not return::see the loader-diag artifact. A timeout is not a pass and not yet a diagnosis: the sample(1) trace in that artifact says where the process was stuck."
+            exit 1
+          fi
+
+      # The load test: a native arm64 Windows executable that loads d3d11 and
+      # resolves the entry points. It is the same question the PE workflow asked by
+      # reading exports, asked the other way -- by asking Wine to load the module
+      # and hand back the address.
+      # The D3D11 runtime load, with the modules it loads actually present.
+      #
+      # The previous version of this step reported success while its own output said
+      # "d3d11.dll not found". The modules were built in a different job in a
+      # different tree, and the step did not fail when the thing it was testing was
+      # absent -- which meant the table's D3D11 row was decided by a grep over a file
+      # that never mentioned d3d11. That is the false green this replaces.
+      #
+      # The set of modules to build is computed, not guessed. It starts from the
+      # modules the test names and follows their import tables with llvm-readobj,
+      # because a module loads exactly when all of its static imports resolve. The
+      # programs Wine runs to initialise a prefix are built too: without them the
+      # first run of the loader stops before the test program starts.
+      #
+      # A module that is missing fails this step. A load test that cannot find the
+      # module it loads measures nothing, and "measures nothing" is not a pass.
+      - name: Build and run the D3D11 load test
+        run: |
+          set -euo pipefail
+          export PATH="$MINGW_ROOT/bin:$PATH"
+          cd "$WINE_BUILD"
+          out="$RUNNER_TEMP/wine-load-test.txt"
+          : > "$out"
+          ncpu=$(sysctl -n hw.ncpu)
+          pe_arch=aarch64-windows
+          export WINEPREFIX="$RUNNER_TEMP/prefix"
+          mkdir -p "$WINEPREFIX"
+
+          echo "=== modules for the load test, and the closure of what they import ===" | tee -a "$out"
+          queue="ntdll kernel32 d3d11 dxgi d3dcompiler_47 msvcrt"
+          done_modules=""
+          failed_modules=""
+          while [ -n "$queue" ]; do
+            module=$(printf '%s' "$queue" | cut -d' ' -f1)
+            queue=$(printf '%s' "$queue" | cut -s -d' ' -f2-)
+            case " $done_modules " in
+              *" $module "*) continue ;;
+            esac
+            done_modules="$done_modules $module"
+            if [ ! -d "dlls/$module" ]; then
+              echo "no source directory dlls/$module, which is normal for an api set" | tee -a "$out"
+              continue
+            fi
+            if make -C "dlls/$module" -j"$ncpu" >> "$out" 2>&1; then
+              if [ -f "dlls/$module/$pe_arch/$module.dll" ]; then
+                echo "built dlls/$module/$pe_arch/$module.dll" | tee -a "$out"
+              else
+                echo "make succeeded and produced no $pe_arch module for $module" | tee -a "$out"
+                continue
+              fi
+            else
+              failed_modules="$failed_modules $module"
+              echo "BUILD FAILED $module" | tee -a "$out"
+              continue
+            fi
+            imports=$(llvm-readobj --coff-imports "dlls/$module/$pe_arch/$module.dll" 2>/dev/null \
+              | grep -oE 'Name: [A-Za-z0-9_.-]+\.dll' | awk '{print $2}' | sort -u || true)
+            for imported in $imports; do
+              base=$(printf '%s' "$imported" | sed 's/\.dll$//' | tr 'A-Z' 'a-z')
+              if [ -d "dlls/$base" ]; then
+                queue="$queue $base"
+              fi
+            done
+          done
+          echo "closure built:$done_modules" | tee -a "$out"
+          if [ -n "$failed_modules" ]; then
+            echo "modules whose build failed:$failed_modules" | tee -a "$out"
+          fi
+
+          # The programs Wine needs to initialise a prefix on the first run.
+          for program in wineboot services rundll32 explorer; do
+            if [ -d "programs/$program" ]; then
+              if make -C "programs/$program" -j"$ncpu" >> "$out" 2>&1; then
+                echo "built programs/$program" | tee -a "$out"
+              else
+                echo "BUILD FAILED programs/$program" | tee -a "$out"
+              fi
+            fi
+          done
+
+          # The five modules the test names have to exist, or this step fails now.
+          missing=""
+          for module in ntdll kernel32 d3d11 dxgi d3dcompiler_47; do
+            if [ ! -f "dlls/$module/$pe_arch/$module.dll" ]; then
+              missing="$missing $module"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error title=the modules the load test names are not present::$pe_arch modules missing:$missing. This step builds them and fails when it cannot, because a load test without its module is not a measurement."
+            grep -E 'BUILD FAILED|error:|Error' "$out" | head -20 || true
+            exit 1
+          fi
+          echo "all five modules the test names are present" | tee -a "$out"
+
+          WINEDLLPATH="dlls/ntdll:dlls/win32u:$(find dlls -maxdepth 2 -type d -name '*-windows' | sort | tr '\n' ':')"
+          export WINEDLLPATH
+          echo "module path: $(printf '%s' "$WINEDLLPATH" | cut -c1-200)" | tee -a "$out"
+
+          aarch64-w64-mingw32-clang "$GITHUB_WORKSPACE/tests/wine/load_d3d11.c" \
+            -o "$RUNNER_TEMP/load_d3d11.exe" >> "$out" 2>&1 || {
+            echo "::error title=the load test did not compile::see wine-load-test.txt"
+            tail -20 "$out"
+            exit 1
+          }
+          file "$RUNNER_TEMP/load_d3d11.exe" | tee -a "$out"
+
+          if [ -z "${WINE_LOADER:-}" ] || [ ! -x "$WINE_LOADER" ]; then
+            echo "::error title=no loader::the build step records the loader path and there is none to run the test with"
+            exit 1
+          fi
+
+          # A limit that cannot turn a failure into a pass: the child is killed after
+          # it, and a killed child leaves a status that no grep will read as OK.
+          run_limited() {
+            seconds="$1"
+            log="$2"
+            shift 2
+            "$@" >> "$log" 2>&1 &
+            pid=$!
+            waited=0
+            while [ "$waited" -lt "$seconds" ] && kill -0 "$pid" 2>/dev/null; do
+              sleep 1
+              waited=$((waited + 1))
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+              echo "the load test was still running after ${seconds}s and was stopped" | tee -a "$log"
+              kill -9 "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+              return 137
+            fi
+            wait "$pid"
+            return $?
+          }
+
+          # Whether the failure that follows is Wine's answer or this machine's is a
+          # question about the operating system, so it is asked of the operating
+          # system. /usr/bin/clang, because the clang first on PATH is llvm-mingw's.
+          echo "=== what this machine lets a running process reserve ===" | tee -a "$out"
+          if /usr/bin/clang "$GITHUB_WORKSPACE/tests/wine/reserve_probe.c" -o "$RUNNER_TEMP/reserve_probe" >> "$out" 2>&1; then
+            "$RUNNER_TEMP/reserve_probe" | tee -a "$out"
+          else
+            echo "the reservation probe did not compile, see above" | tee -a "$out"
+          fi
+
+          # The same yes-or-no question, asked about executable pages, because Wine
+          # answered it with map_image_into_view failed to set 60000020 protection on
+          # the load test's .text section. Unsigned first, then ad-hoc signed with the
+          # four entitlements that concern executable memory, so the difference between
+          # the two runs is the entitlements and nothing else.
+          echo "=== what this machine lets a running process execute ===" | tee -a "$out"
+          if /usr/bin/clang "$GITHUB_WORKSPACE/tests/wine/exec_probe.c" -o "$RUNNER_TEMP/exec_probe" >> "$out" 2>&1; then
+            echo "--- unsigned" | tee -a "$out"
+            "$RUNNER_TEMP/exec_probe" "$RUNNER_TEMP/load_d3d11.exe" >> "$out" 2>&1
+            printf 'probe exit status: %d\n' "$?" | tee -a "$out"
+            cp "$RUNNER_TEMP/exec_probe" "$RUNNER_TEMP/exec_probe_signed"
+            if codesign --force --sign - --entitlements "$GITHUB_WORKSPACE/tests/wine/entitlements.plist" "$RUNNER_TEMP/exec_probe_signed" >> "$out" 2>&1; then
+              echo "--- ad-hoc signed with the executable memory entitlements" | tee -a "$out"
+              codesign -d --entitlements - "$RUNNER_TEMP/exec_probe_signed" >> "$out" 2>&1
+              "$RUNNER_TEMP/exec_probe_signed" "$RUNNER_TEMP/load_d3d11.exe" >> "$out" 2>&1
+              printf 'probe exit status: %d\n' "$?" | tee -a "$out"
+            else
+              echo "the probe could not be signed, see above" | tee -a "$out"
+            fi
+          else
+            echo "the executable memory probe did not compile, see above" | tee -a "$out"
+          fi
+
+          # Where this machine lets a process put a mapping, GB by GB from the 4GB
+          # line. The loader's pagezero was measured at 4GB, and a window that cannot
+          # be mapped or have its protections changed is what the PE ImageBase fell
+          # into; this says which addresses are inside it, which is the measurement the
+          # reserved window registration in Wine is made of. Addresses that are granted
+          # are unmapped again, so the process is left as it was found.
+          echo "=== which addresses this machine lets a process map ===" | tee -a "$out"
+          if /usr/bin/clang "$GITHUB_WORKSPACE/tests/wine/window_probe.c" -o "$RUNNER_TEMP/window_probe" >> "$out" 2>&1; then
+            "$RUNNER_TEMP/window_probe" >> "$out" 2>&1
+          else
+            echo "the window probe did not compile, see above" | tee -a "$out"
+          fi
+
+          set +e
+          run_limited 900 "$out" "./$WINE_LOADER" "$RUNNER_TEMP/load_d3d11.exe"
+          rc=$?
+          set -e
+          echo "load test exit status: $rc" | tee -a "$out"
+          echo "--- what Wine said, in full" | tee -a "$out"
+          tail -40 "$out"
+
+          # The verdict is the program's own words: LOAD TEST OK is printed only when
+          # every module loaded and every entry point resolved.
+          if [ "$rc" -ne 0 ] || ! grep -q 'LOAD TEST OK' "$out"; then
+            echo "::error title=the D3D11 runtime load did not pass::exit status $rc. Wine's own message above is more useful than any summary this step could write."
+            exit 1
+          fi
+          echo "the D3D11 runtime load passed: every module loaded and every entry point resolved"
+
+      # The verdict, and the only place this job decides anything.
+      #
+      # PASS is evidence present. FAIL is a prerequisite missing, and a FAIL here
+      # fails the job -- that is the whole point of writing the table. SKIP is only
+      # for what this machine cannot test at all, which in this job means hardware
+      # it does not have, and it is written as REQUIRES HARDWARE. A build failure
+      # and a hardware limit are different answers and this table does not blur
+      # them into one another.
+      - name: Verification table
+        if: always()
+        run: |
+          set -euo pipefail
+          cd "$WINE_BUILD"
+
+          fails=0
+          rows=""
+          row() {
+            rows=$(printf '%s| %s | %s | %s |\n' "$rows" "$1" "$2" "$3")
+            if [ "$2" = "FAIL" ]; then fails=$((fails + 1)); fi
+          }
+          have() { if [ -e "$1" ]; then echo yes; else echo no; fi; }
+          in_log() { # file, pattern
+            if [ -f "$1" ] && grep -q "$2" "$1" 2>/dev/null; then echo yes; else echo no; fi
+          }
+          verdict() { # yes/no -> PASS/FAIL
+            if [ "$1" = yes ]; then echo PASS; else echo FAIL; fi
+          }
+
+          loader="${WINE_LOADER:-}"
+          loader_ok=$(if [ -n "$loader" ] && [ -x "$loader" ]; then echo yes; else echo no; fi)
+          ntdll=$(have dlls/ntdll/ntdll.so)
+          win32u=$(have dlls/win32u/win32u.so)
+          server=$(have server/wineserver)
+          # The verdict reads the status files the diagnostic wrote, not the fact
+          # that some step finished. Each configuration has its own directory, so a
+          # status cannot be lost between a run and its log.
+          configs="control_echo control_wineserver plain noflags help"
+          status_of() {
+            f="$RUNNER_TEMP/loader-diag/$1/status"
+            if [ -f "$f" ] && [ "$(cat "$f")" = 0 ]; then echo yes; else echo no; fi
+          }
+          version=no
+          for config in $configs; do
+            if [ "$(status_of "$config")" = yes ]; then version=yes; break; fi
+          done
+          stuck=$(for config in $configs; do
+                    f="$RUNNER_TEMP/loader-diag/$config/status"
+                    [ -f "$f" ] && printf '%s=%s ' "$config" "$(cat "$f")"
+                  done)
+          loaded_any=$(for config in $configs; do
+                         f="$RUNNER_TEMP/loader-diag/$config/stdout"
+                         [ -s "$f" ] && printf '%s ' "$config"
+                       done)
+          d3d11=$(in_log "$RUNNER_TEMP/wine-load-test.txt" 'OK   d3d11.dll')
+          dxgi=$(in_log "$RUNNER_TEMP/wine-load-test.txt" 'OK   dxgi.dll')
+          compiler=$(in_log "$RUNNER_TEMP/wine-load-test.txt" 'OK   d3dcompiler_47.dll')
+
+          row "Wine Unix runtime" \
+              "$([ "$ntdll" = yes ] && [ "$win32u" = yes ] && [ "$server" = yes ] && echo PASS || echo FAIL)" \
+              "ntdll.so=$ntdll, win32u.so=$win32u, wineserver=$server"
+          row "Wine loader" "$(verdict "$loader_ok")" "${loader:-neither loader/wine nor loader/wine64 was produced}"
+          row "Wine loader runs" "$(verdict "$version")" "statuses: ${stuck:-no configuration ran}"
+          row "Wine loader prints anything" \
+              "$([ -n "$loaded_any" ] && echo PASS || echo FAIL)" \
+              "stdout non-empty in: ${loaded_any:-none}"
+          row "D3D11 runtime load" "$(verdict "$d3d11")" "LoadLibraryA(d3d11.dll) and D3D11CreateDevice"
+          row "DXGI runtime load" "$(verdict "$dxgi")" "LoadLibraryA(dxgi.dll) and CreateDXGIFactory"
+          row "D3DCompile runtime" "$(verdict "$compiler")" "LoadLibraryA(d3dcompiler_47.dll) and D3DCompile"
+          row "DXMT linkage" "NOT STARTED" "after Wine runtime is verified, per the stage order"
+          row "libc++ dependency" "NOT STARTED" "needs otool -L on a built winemetal.dylib"
+          row "Metal 4 command path" "NOT STARTED" "Wine and DXMT first"
+          row "Real Apple Silicon GPU" "REQUIRES HARDWARE" "this runner has no Apple GPU; nothing here is GPU-verified"
+          row "Metal 3 fallback" "DISABLED" "mr_host_pick_backend returns Metal 4 or nothing"
+
+          {
+            echo "# Mr verification, Wine Unix runtime"
+            echo ""
+            echo "| | | |"
+            echo "| --- | --- | --- |"
+            printf '%s' "$rows"
+            echo ""
+            echo "A loader that starts is not Wine running a title. A DLL that loads is"
+            echo "not a DLL that draws. The rows above say which of those happened."
+          } | tee "$RUNNER_TEMP/wine-unix-verification.txt"
+          cat "$RUNNER_TEMP/wine-unix-verification.txt" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$fails" -gt 0 ]; then
+            echo "::error title=$fails Wine Unix row(s) failed::see wine-unix-verification.txt. A missing prerequisite is a failure, not a skip."
+            exit 1
+          fi
+
+      - name: Upload Wine Unix evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-unix-evidence
+          path: |
+            ${{ runner.temp }}/wine-unix-configure.log
+            ${{ runner.temp }}/wine-unix-build.log
+            ${{ runner.temp }}/wine-unix-plan.txt
+            ${{ runner.temp }}/wine-unix-files.txt
+            ${{ runner.temp }}/wine-loader-binary.txt
+            ${{ runner.temp }}/wine-loader-run.txt
+            ${{ runner.temp }}/wine-load-test.txt
+            ${{ runner.temp }}/wine-unix-verification.txt
+            ${{ runner.temp }}/loader-diag/
+          if-no-files-found: warn
