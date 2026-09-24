@@ -14,7 +14,11 @@ name: Metal 4 layer
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    # Every branch, not just main. A `pull_request` trigger cannot do this job:
+    # GitHub only runs pull_request workflows that already exist on the base
+    # branch, and main carries no .github/workflows at all -- this file is the
+    # only one -- so a PR would never start it. Pushing the branch does.
+    branches: ["**"]
     paths:
       - "graphics/metal4/**"
       - "tools/check-metal4.sh"
