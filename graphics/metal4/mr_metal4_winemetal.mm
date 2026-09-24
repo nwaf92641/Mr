@@ -430,11 +430,10 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
             break;
           }
           mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->dispatch_args_buffer));
-          /* The Metal 3 selector for an indirect mesh dispatch does not exist on
-           * MTL4RenderCommandEncoder. Reporting it keeps the type counted as
-           * untranslated until the MTL4 form is read from the SDK. */
-          fprintf(stderr, "[mr-mtl4] indirect mesh dispatch: MTL4 selector not read yet
-");
+          [state.encoder drawMeshThreadgroupsWithIndirectBuffer:(MTLGPUAddress)((uint64_t)[dispatch gpuAddress] + cmd->dispatch_args_offset)
+                                       threadsPerObjectThreadgroup:MTLSizeMake(cmd->vertex_per_warp,
+                                                                               1, 1)
+                                         threadsPerMeshThreadgroup:mesh_group];
           if (!bind_object(cmd->imm_draw_arguments, 0, kObjectArgumentsSlot)) {
             break;
           }
@@ -451,11 +450,10 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
             break;
           }
           mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->dispatch_args_buffer));
-          /* The Metal 3 selector for an indirect mesh dispatch does not exist on
-           * MTL4RenderCommandEncoder. Reporting it keeps the type counted as
-           * untranslated until the MTL4 form is read from the SDK. */
-          fprintf(stderr, "[mr-mtl4] indirect mesh dispatch: MTL4 selector not read yet
-");
+          [state.encoder drawMeshThreadgroupsWithIndirectBuffer:(MTLGPUAddress)((uint64_t)[dispatch gpuAddress] + cmd->dispatch_args_offset)
+                                       threadsPerObjectThreadgroup:MTLSizeMake(cmd->vertex_per_warp,
+                                                                               1, 1)
+                                         threadsPerMeshThreadgroup:mesh_group];
           if (!bind_object(cmd->imm_draw_arguments, 0, kObjectArgumentsSlot)) {
             break;
           }
@@ -497,11 +495,11 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
             break;
           }
           mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->dispatch_args_buffer));
-          /* The Metal 3 selector for an indirect mesh dispatch does not exist on
-           * MTL4RenderCommandEncoder. Reporting it keeps the type counted as
-           * untranslated until the MTL4 form is read from the SDK. */
-          fprintf(stderr, "[mr-mtl4] indirect mesh dispatch: MTL4 selector not read yet
-");
+          [state.encoder
+              drawMeshThreadgroupsWithIndirectBuffer:(MTLGPUAddress)((uint64_t)[dispatch gpuAddress] + cmd->dispatch_args_offset)
+                           threadsPerObjectThreadgroup:MTLSizeMake(cmd->threads_per_patch,
+                                                                   cmd->patch_per_group, 1)
+                             threadsPerMeshThreadgroup:MTLSizeMake(32, 1, 1)];
           if (!bind_object(cmd->imm_draw_arguments, 0, kObjectArgumentsSlot)) {
             break;
           }
@@ -518,11 +516,11 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
             break;
           }
           mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->dispatch_args_buffer));
-          /* The Metal 3 selector for an indirect mesh dispatch does not exist on
-           * MTL4RenderCommandEncoder. Reporting it keeps the type counted as
-           * untranslated until the MTL4 form is read from the SDK. */
-          fprintf(stderr, "[mr-mtl4] indirect mesh dispatch: MTL4 selector not read yet
-");
+          [state.encoder
+              drawMeshThreadgroupsWithIndirectBuffer:(MTLGPUAddress)((uint64_t)[dispatch gpuAddress] + cmd->dispatch_args_offset)
+                           threadsPerObjectThreadgroup:MTLSizeMake(cmd->threads_per_patch,
+                                                                   cmd->patch_per_group, 1)
+                             threadsPerMeshThreadgroup:MTLSizeMake(32, 1, 1)];
           if (!bind_object(cmd->imm_draw_arguments, 0, kObjectArgumentsSlot)) {
             break;
           }
