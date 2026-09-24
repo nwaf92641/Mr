@@ -297,22 +297,6 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
                                                cmd->indirect_args_offset)];
       return true;
     }
-    case WMTRenderCommandDrawMeshThreadgroups: {
-      const auto *cmd = (const struct wmtcmd_render_draw_meshthreadgroups *)command;
-      /* object and mesh threadgroup sizes are Metal 3 pipeline state; in Metal 4
-       * they are still passed with the draw. */
-      [state.encoder
-          drawMeshThreadgroups:MTLSizeMake(cmd->threadgroup_per_grid.x,
-                                           cmd->threadgroup_per_grid.y,
-                                           cmd->threadgroup_per_grid.z)
-              threadsPerObjectThreadgroup:MTLSizeMake(cmd->object_threadgroup_size.x,
-                                                      cmd->object_threadgroup_size.y,
-                                                      cmd->object_threadgroup_size.z)
-                threadsPerMeshThreadgroup:MTLSizeMake(cmd->mesh_threadgroup_size.x,
-                                                      cmd->mesh_threadgroup_size.y,
-                                                      cmd->mesh_threadgroup_size.z)];
-      return true;
-    }
     case WMTRenderCommandDraw: {
       const auto *cmd = (const struct wmtcmd_render_draw *)command;
       [state.encoder drawPrimitives:(MTLPrimitiveType)cmd->primitive_type
