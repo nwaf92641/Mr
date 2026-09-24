@@ -194,6 +194,6 @@ echo "check-metal4:        compile check only; running it needs a device with MT
 sdk_path="$(xcrun --sdk iphoneos --show-sdk-path)"
 compute_header="$sdk_path/System/Library/Frameworks/Metal.framework/Headers/MTL4ComputeCommandEncoder.h"
 echo "check-metal4: --- compute copy selectors, verbatim"
-sed -n "140,180p" "$compute_header" 2>/dev/null || true
+sed -n "140,275p" "$compute_header" 2>/dev/null || true
 echo "check-metal4: --- compute fill mipmap bytes"
-sed -n "460,540p" "$compute_header" 2>/dev/null || true
+sed -n "440,565p" "$compute_header" 2>/dev/null || true
