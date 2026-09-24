@@ -358,6 +358,25 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
           visibilityOptions:(MTL4VisibilityOptions)0];
       return true;
     }
+    case WMTRenderCommandUseResource: {
+      const auto *cmd = (const struct wmtcmd_render_useresource *)command;
+      /* Metal 4 removed useResource:usage:stages: and governs access through
+       * residency instead, so the resource is added to the set rather than a
+       * call being invented. The usage scope has no Metal 4 counterpart: being
+       * resident without declaring read/write is the permissive direction, and
+       * permissive is the side to err on -- it allows an access rather than
+       * denying one that the guest clearly intends.
+       *
+       * This matters for resources reached through a binding this walk never
+       * sees, which is the case useResource exists for. */
+      if (cmd->resource == 0) {
+        break;
+      }
+      if (!mr_mtl4_residency_add(state.residency, MR_WMT_RAW(cmd->resource))) {
+        break;
+      }
+      return true;
+    }
     case WMTRenderCommandSetObjectBuffer: {
       const auto *cmd = (const struct wmtcmd_render_setbuffer *)command;
       if (!wmt_stages().object.valid(cmd->index)) {

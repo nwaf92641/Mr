@@ -134,7 +134,7 @@ fi
 # be a count, not a reading: the Metal 3 walk reports its gaps at run time, which
 # only helps once something runs.
 if [[ -f "$ROOT/research/dxmt/src/winemetal/winemetal.h" ]]; then
-    if ! python3 "$ROOT/tools/check-metal4-enum.py" --root "$ROOT"; then
+    if ! python3 "$ROOT/tools/check-metal4-enum.py" --root "$ROOT" --strict; then
         status=1
     fi
 else

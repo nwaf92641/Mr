@@ -43,10 +43,15 @@ for entry in block.group(1).split(','):
     if name and not name.startswith('//'):
         names.append(name)
 
-missing = [n for n in names if ('case ' + n + ':') not in bridge]
-translated = len(names) - len(missing)
+# Unused<N> are ids DXMT reserves rather than opcodes it sends, so they are not
+# missing translations and must not keep the gate red.
+commands = [n for n in names if not re.fullmatch(r'Unused\d+', n)]
+missing = [n for n in commands if ('case ' + n + ':') not in bridge]
+translated = len(commands) - len(missing)
+reserved = len(names) - len(commands)
 
-print('check-metal4-enum: %d of %d render command types translated' % (translated, len(names)))
+print('check-metal4-enum: %d of %d render command types translated (%d reserved ids)'
+      % (translated, len(commands), reserved))
 for name in missing:
     print('check-metal4-enum:   not translated: %s (id %d)' % (name, names.index(name)))
 
