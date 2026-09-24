@@ -1060,6 +1060,80 @@ void mr_mtl4_render_pass_set_stencil(void *rp_desc, void *mtl_texture, mr_mtl4_l
   mr_mtl4_fail("Metal 4 requires iOS 26 or macOS 26");
 }
 
+void mr_mtl4_render_pass_set_color_plane(void *rp_desc, uint32_t index, uint32_t level,
+                                         uint32_t slice, uint32_t depth_plane) {
+  if (rp_desc == nullptr) {
+    mr_mtl4_fail("mr_mtl4_render_pass_set_color_plane: null descriptor");
+    return;
+  }
+  if (@available(iOS 26.0, macOS 26.0, *)) {
+    MTL4RenderPassDescriptor *desc = (__bridge MTL4RenderPassDescriptor *)rp_desc;
+    MTLRenderPassColorAttachmentDescriptor *attachment = desc.colorAttachments[index];
+    if (attachment == nil) {
+      mr_mtl4_fail("mr_mtl4_render_pass_set_color_plane: attachment index out of range");
+      return;
+    }
+    attachment.level = (NSUInteger)level;
+    attachment.slice = (NSUInteger)slice;
+    attachment.depthPlane = (NSUInteger)depth_plane;
+    return;
+  }
+  mr_mtl4_fail("Metal 4 requires iOS 26 or macOS 26");
+}
+
+void mr_mtl4_render_pass_set_color_resolve_plane(void *rp_desc, uint32_t index, uint32_t level,
+                                                 uint32_t slice, uint32_t depth_plane) {
+  if (rp_desc == nullptr) {
+    mr_mtl4_fail("mr_mtl4_render_pass_set_color_resolve_plane: null descriptor");
+    return;
+  }
+  if (@available(iOS 26.0, macOS 26.0, *)) {
+    MTL4RenderPassDescriptor *desc = (__bridge MTL4RenderPassDescriptor *)rp_desc;
+    MTLRenderPassColorAttachmentDescriptor *attachment = desc.colorAttachments[index];
+    if (attachment == nil) {
+      mr_mtl4_fail("mr_mtl4_render_pass_set_color_resolve_plane: attachment index out of range");
+      return;
+    }
+    attachment.resolveLevel = (NSUInteger)level;
+    attachment.resolveSlice = (NSUInteger)slice;
+    attachment.resolveDepthPlane = (NSUInteger)depth_plane;
+    return;
+  }
+  mr_mtl4_fail("Metal 4 requires iOS 26 or macOS 26");
+}
+
+void mr_mtl4_render_pass_set_depth_plane(void *rp_desc, uint32_t level, uint32_t slice,
+                                         uint32_t depth_plane) {
+  if (rp_desc == nullptr) {
+    mr_mtl4_fail("mr_mtl4_render_pass_set_depth_plane: null descriptor");
+    return;
+  }
+  if (@available(iOS 26.0, macOS 26.0, *)) {
+    MTL4RenderPassDescriptor *desc = (__bridge MTL4RenderPassDescriptor *)rp_desc;
+    MTLRenderPassDepthAttachmentDescriptor *attachment = desc.depthAttachment;
+    attachment.level = (NSUInteger)level;
+    attachment.slice = (NSUInteger)slice;
+    attachment.depthPlane = (NSUInteger)depth_plane;
+    return;
+  }
+  mr_mtl4_fail("Metal 4 requires iOS 26 or macOS 26");
+}
+
+void mr_mtl4_render_pass_set_stencil_plane(void *rp_desc, uint32_t level, uint32_t slice) {
+  if (rp_desc == nullptr) {
+    mr_mtl4_fail("mr_mtl4_render_pass_set_stencil_plane: null descriptor");
+    return;
+  }
+  if (@available(iOS 26.0, macOS 26.0, *)) {
+    MTL4RenderPassDescriptor *desc = (__bridge MTL4RenderPassDescriptor *)rp_desc;
+    MTLRenderPassStencilAttachmentDescriptor *attachment = desc.stencilAttachment;
+    attachment.level = (NSUInteger)level;
+    attachment.slice = (NSUInteger)slice;
+    return;
+  }
+  mr_mtl4_fail("Metal 4 requires iOS 26 or macOS 26");
+}
+
 /* ------------------------------------------------------ transient allocator */
 
 MR_MTL4_AVAIL static mr_mtl4_transient *transient_create_impl(void *mtl_device,

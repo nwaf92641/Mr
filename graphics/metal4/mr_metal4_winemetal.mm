@@ -576,8 +576,11 @@ bool mr_mtl4_wmt_session_render_encoder(uint64_t command_buffer, const void *ren
                                   (mr_mtl4_load_action)color.load_action,
                                   (mr_mtl4_store_action)color.store_action, color.clear_color.r,
                                   color.clear_color.g, color.clear_color.b, color.clear_color.a);
+    mr_mtl4_render_pass_set_color_plane(pass, i, color.level, color.slice, color.depth_plane);
     if (color.resolve_texture != 0) {
       mr_mtl4_render_pass_set_color_resolve(pass, i, MR_WMT_RAW(color.resolve_texture));
+      mr_mtl4_render_pass_set_color_resolve_plane(pass, i, color.resolve_level, color.resolve_slice,
+                                                  color.resolve_depth_plane);
     }
   }
   if (info->depth.texture != 0) {
@@ -585,12 +588,15 @@ bool mr_mtl4_wmt_session_render_encoder(uint64_t command_buffer, const void *ren
                                   (mr_mtl4_load_action)info->depth.load_action,
                                   (mr_mtl4_store_action)info->depth.store_action,
                                   info->depth.clear_depth);
+    mr_mtl4_render_pass_set_depth_plane(pass, info->depth.level, info->depth.slice,
+                                        info->depth.depth_plane);
   }
   if (info->stencil.texture != 0) {
     mr_mtl4_render_pass_set_stencil(pass, MR_WMT_RAW(info->stencil.texture),
                                     (mr_mtl4_load_action)info->stencil.load_action,
                                     (mr_mtl4_store_action)info->stencil.store_action,
                                     info->stencil.clear_stencil);
+    mr_mtl4_render_pass_set_stencil_plane(pass, info->stencil.level, info->stencil.slice);
   }
   if (!mr_mtl4_frame_begin_render_pass(frame, pass)) {
     fprintf(stderr, "[mr-mtl4] render encoder failed: %s\n", mr_mtl4_last_error());

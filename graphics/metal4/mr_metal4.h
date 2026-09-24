@@ -273,10 +273,22 @@ void mr_mtl4_render_pass_set_color(void *rp_desc, uint32_t index, void *mtl_text
                                    double clear_r, double clear_g, double clear_b, double clear_a);
 void mr_mtl4_render_pass_set_color_resolve(void *rp_desc, uint32_t index,
                                            void *mtl_resolve_texture);
+
+/* Which level, slice and depth plane of an array or mip attachment the pass
+ * reads and writes. Metal defaults all three to 0, so without these a render
+ * target that is not layer 0 of mip 0 silently targets the wrong surface --
+ * a wrong image rather than an error, which is why they are not optional. */
+void mr_mtl4_render_pass_set_color_plane(void *rp_desc, uint32_t index, uint32_t level,
+                                         uint32_t slice, uint32_t depth_plane);
+void mr_mtl4_render_pass_set_color_resolve_plane(void *rp_desc, uint32_t index, uint32_t level,
+                                                 uint32_t slice, uint32_t depth_plane);
 void mr_mtl4_render_pass_set_depth(void *rp_desc, void *mtl_texture, mr_mtl4_load_action load,
                                    mr_mtl4_store_action store, double clear_depth);
+void mr_mtl4_render_pass_set_depth_plane(void *rp_desc, uint32_t level, uint32_t slice,
+                                         uint32_t depth_plane);
 void mr_mtl4_render_pass_set_stencil(void *rp_desc, void *mtl_texture, mr_mtl4_load_action load,
                                      mr_mtl4_store_action store, uint32_t clear_stencil);
+void mr_mtl4_render_pass_set_stencil_plane(void *rp_desc, uint32_t level, uint32_t slice);
 
 /* ------------------------------------------------------ transient allocator */
 

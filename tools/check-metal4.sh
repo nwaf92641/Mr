@@ -90,6 +90,7 @@ dispatch|dispatchThreadgroups|dispatchThreads:
 queue commit|commit:.*count:|signalEvent:|waitForEvent:
 argument table descriptor|maxBufferBindCount|maxTextureBindCount|maxSamplerStateBindCount|supportAttributeStrides|initializeBindings
 render pass descriptor width|renderTargetWidth|renderTargetHeight
+barrier and fence|afterStages|beforeStages|updateFence|waitForFence
 suspend resume|MTL4RenderEncoderOption
 PATTERNS
 }
