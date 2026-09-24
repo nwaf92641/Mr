@@ -244,6 +244,7 @@ void mr_mtl4_table_destroy(mr_mtl4_table *table) {
 
 MR_MTL4_AVAIL static void table_set_buffer_impl(mr_mtl4_table *table, uint64_t gpu_address,
                                                uint32_t stride, uint32_t index, bool strided) {
+  (void)stride; /* only the unimplemented strided path would use it */
   if (table == nullptr || table->table == nil) {
     return;
   }
@@ -254,13 +255,17 @@ MR_MTL4_AVAIL static void table_set_buffer_impl(mr_mtl4_table *table, uint64_t g
     return;
   }
   if (strided) {
-    [(id<MTL4ArgumentTable>)table->table setAddress:(MTLGPUAddress)gpu_address
-                                             stride:(NSUInteger)stride
-                                            atIndex:(NSUInteger)index];
-  } else {
-    [(id<MTL4ArgumentTable>)table->table setAddress:(MTLGPUAddress)gpu_address
-                                            atIndex:(NSUInteger)index];
+    /* MTL4ArgumentTable.h declares two setAddress: variants. The SDK rejected
+     * 'setAddress:stride:atIndex:', so this one is left unimplemented rather
+     * than guessed a second time -- a wrong selector here would bind a wrong
+     * stride and look like geometry corruption, not like a bug in binding.
+     * check-metal4.sh prints the real signatures; implement from those. */
+    mr_mtl4_fail("mr_mtl4_table_set_buffer_strided: strided binding is not implemented yet; "
+                 "the SDK's strided setAddress: signature has not been read");
+    return;
   }
+  [(id<MTL4ArgumentTable>)table->table setAddress:(MTLGPUAddress)gpu_address
+                                          atIndex:(NSUInteger)index];
 }
 
 void mr_mtl4_table_set_buffer(mr_mtl4_table *table, uint64_t gpu_address, uint32_t index) {
@@ -289,7 +294,7 @@ void mr_mtl4_table_set_texture(mr_mtl4_table *table, void *mtl_texture, uint32_t
     if (table->table == nil) {
       return;
     }
-    [(id<MTL4ArgumentTable>)table->table setTexture:[(__bridge id<MTLResource>)mtl_texture
+    [(id<MTL4ArgumentTable>)table->table setTexture:[(__bridge id<MTLTexture>)mtl_texture
                                                        gpuResourceID]
                                             atIndex:(NSUInteger)index];
     return;
@@ -307,7 +312,7 @@ void mr_mtl4_table_set_sampler(mr_mtl4_table *table, void *mtl_sampler, uint32_t
       return;
     }
     [(id<MTL4ArgumentTable>)table->table
-        setSamplerState:[(__bridge id<MTLResource>)mtl_sampler gpuResourceID]
+        setSamplerState:[(__bridge id<MTLSamplerState>)mtl_sampler gpuResourceID]
                 atIndex:(NSUInteger)index];
     return;
   }
@@ -549,7 +554,7 @@ void mr_mtl4_frame_bind_table(mr_mtl4_frame *frame, mr_mtl4_table *table) {
     if (frame->render != nil) {
       [(id<MTL4RenderCommandEncoder>)frame->render
           setArgumentTable:(id<MTL4ArgumentTable>)table->table
-                  atStages:(MTLRenderStage)table->stages];
+                  atStages:(MTLRenderStages)table->stages];
     } else if (frame->compute != nil) {
       [(id<MTL4ComputeCommandEncoder>)frame->compute
           setArgumentTable:(id<MTL4ArgumentTable>)table->table];

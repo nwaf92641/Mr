@@ -70,7 +70,7 @@ dump_surface() {
     while IFS='|' read -r topic pattern; do
         [[ -n "$topic" ]] || continue
         echo "check-metal4: --- $topic"
-        grep -nH -E "$pattern" "${headers[@]}" | grep -vE ':[0-9]+: *(\*|//)' | head -14 | sed 's/^/    /'
+        grep -nH -A2 -E "$pattern" "${headers[@]}" | grep -vE ':[0-9]+: *(\*|//)' | head -40 | sed 's/^/    /'
     done <<'PATTERNS'
 gpuResourceID|gpuResourceID
 argument table setters|setAddress|setTexture:|setSamplerState:|setBytes:

@@ -97,8 +97,10 @@ MR_MTL4_AVAIL int run_impl(FILE *out, void *mtl_drawable) {
                                                         height:height
                                                      mipmapped:NO];
   /* Shared so the harness can read the result back; a real back buffer is
-   * Private and would need a blit to a shared buffer instead. */
-  texture_desc.storageMode = MTLResourceStorageModeShared;
+   * Private and would need a blit to a shared buffer instead. The cast is
+   * required: iOS 26 declares the storage-mode constants as a different enum
+   * from the MTLStorageMode the property takes. */
+  texture_desc.storageMode = (MTLStorageMode)MTLResourceStorageModeShared;
   texture_desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
   id<MTLTexture> target = [mtl newTextureWithDescriptor:texture_desc];
   if (target == nil) {
