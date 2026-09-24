@@ -62,9 +62,10 @@ compile cache clang "$DXMT_SRC/winemetal/unix/cache.c" -x objective-c
 # minute instead of after LLVM. ARC is on here and off in winemetal_unix.c:
 # the C header between them is the seam, so the two conventions never meet.
 MR_MTL4_SRC="$REPO_ROOT/graphics/metal4"
-for metal4 in mr_metal4.mm mr_metal4_milestone.mm; do
+for metal4 in mr_metal4.mm mr_metal4_milestone.mm mr_metal4_winemetal.mm; do
     compile "${metal4%.mm}" clang++ "$MR_MTL4_SRC/$metal4" \
-        -x objective-c++ -fobjc-arc -std=c++17 -I"$MR_MTL4_SRC"
+        -x objective-c++ -fobjc-arc -std=c++17 -I"$MR_MTL4_SRC" \
+        -I"$DXMT_SRC/winemetal" -I"$DXMT_ROOT/include"
 done
 
 for cpp in airconv_context.cpp air_type.cpp air_signature.cpp air_operations.cpp \

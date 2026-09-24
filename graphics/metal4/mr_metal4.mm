@@ -242,6 +242,13 @@ void mr_mtl4_table_destroy(mr_mtl4_table *table) {
   delete table;
 }
 
+void *mr_mtl4_table_metal_table(mr_mtl4_table *table) {
+  if (table == nullptr) {
+    return nullptr;
+  }
+  return (__bridge void *)table->table;
+}
+
 MR_MTL4_AVAIL static void table_set_buffer_impl(mr_mtl4_table *table, uint64_t gpu_address,
                                                uint32_t stride, uint32_t index, bool strided) {
   (void)stride; /* only the unimplemented strided path would use it */

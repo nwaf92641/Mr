@@ -109,6 +109,11 @@ mr_mtl4_table *mr_mtl4_device_new_table(mr_mtl4_device *device, uint32_t max_buf
                                         unsigned stages, bool attribute_strides);
 void mr_mtl4_table_destroy(mr_mtl4_table *table);
 
+/* The raw id<MTL4ArgumentTable>, for the winemetal bridge, which issues the
+ * bindings itself while keeping the address and resource-ID translation in the
+ * layer. */
+void *mr_mtl4_table_metal_table(mr_mtl4_table *table);
+
 /* ------------------------------------------------------------- argument table */
 
 /* A buffer is bound by GPU address, so binding a region is
