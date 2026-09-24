@@ -1,7 +1,119 @@
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -615,7 +615,31 @@
+@@ -70,6 +70,9 @@
+ # include <mach/task.h>
+ # include <mach/thread_state.h>
+ # include <mach/vm_map.h>
++# include <mach/vm_region.h>
++# include <mach-o/dyld.h>
++# include <mach-o/loader.h>
+ #undef host_page_size
+ #endif
+ 
+@@ -489,6 +492,101 @@
+         list_add_before( ptr, &area->entry );
+     }
+ }
++
++#if defined(__APPLE__)
++/***********************************************************************
++ *           add_main_image_reserved_area
++ *
++ * Register the window the main executable reserves for itself.
++ *
++ * Wine maps a PE image at its ImageBase when that address is free, and the load
++ * test asks for 0x140000000. On this platform the loader is a Mach-O executable
++ * with a __PAGEZERO segment, and the run measured the loader's layout:
++ *
++ *   --- no low-address flags: pagezero=0x0 size=0x0000000100000000 text=0x100000000
++ *
++ * 4GB of pagezero is a window that is not mapped and that slides with the image,
++ * and inside it this kernel neither maps nor changes protections. Two addresses
++ * from the runs are in it: a fixed mapping at 0x100000000 came back
++ * KERN_INVALID_ADDRESS, and mprotect at 0x140000000 came back EACCES, which left
++ * the PE's own .text section unable to be made executable.
++ *
++ * Wine learns its reserved areas from the preloader, which is not used on 64-bit
++ * and is not used here, so with nothing registered Wine chooses an address inside
++ * a window the kernel will not let it use. This registers that window.
++ *
++ * It is read from the executable's own header rather than assumed: the slide comes
++ * from dyld, so these are the addresses in this process, not the ones the linker
++ * printed. Address and size are rounded to the host page because that is what the
++ * reserved area list requires. */
++static void add_main_image_reserved_area( void )
++{
++    const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header( 0 );
++    const struct load_command *cmd;
++    intptr_t slide = _dyld_get_image_vmaddr_slide( 0 );
++    const char *ptr;
++    UINT i;
++
++    if (!header || header->magic != MH_MAGIC_64) return;
++
++    ptr = (const char *)(header + 1);
++    for (i = 0; i < header->ncmds; i++)
++    {
++        cmd = (const struct load_command *)ptr;
++        if (cmd->cmdsize < sizeof(*cmd)) break;
++        if (cmd->cmd == LC_SEGMENT_64)
++        {
++            const struct segment_command_64 *seg = (const struct segment_command_64 *)ptr;
++
++            if (!strcmp( seg->segname, "__PAGEZERO" ) && seg->vmsize)
++            {
++                void *addr = ROUND_ADDR( (void *)(UINT_PTR)(seg->vmaddr + slide), host_page_mask );
++                SIZE_T size = ROUND_SIZE( 0, (SIZE_T)seg->vmsize, host_page_mask );
++
++                if (size && (UINT_PTR)addr < (UINT_PTR)user_space_limit)
++                {
++                    mmap_add_reserved_area( addr, size );
++                    ERR( "arm64 main image window: %p-%p registered as reserved\n",
++                         addr, (char *)addr + size );
++                }
++            }
++        }
++        ptr += cmd->cmdsize;
++    }
++}
++
++/***********************************************************************
++ *           describe_mach_region
++ *
++ * What the kernel says about the region containing an address, for the case where
++ * Wine could not change its protection. It tells the two possible answers apart:
++ * the address is not mapped at all, or it is mapped and the kernel will not change
++ * what it is -- which is what a window reserved for the main executable looks like
++ * from inside the process. mach_vm_region leaves the start of the next region
++ * behind when the address is not mapped, so the failure case prints that too. */
++static void describe_mach_region( void *addr )
++{
++    mach_vm_address_t base = (mach_vm_address_t)(UINT_PTR)addr;
++    mach_vm_size_t size = 0;
++    vm_region_basic_info_data_64_t info;
++    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
++    mach_port_t object = MACH_PORT_NULL;
++    kern_return_t ret;
++
++    ret = mach_vm_region( mach_task_self(), &base, &size, VM_REGION_BASIC_INFO_64,
++                          (vm_region_info_t)&info, &count, &object );
++    if (ret != KERN_SUCCESS)
++        ERR( "arm64 region at %p: not mapped (mach ret %d), next region at %p\n",
++             addr, ret, (void *)(UINT_PTR)base );
++    else
++        ERR( "arm64 region at %p: mapped %p-%p, protection %#x, maximum %#x\n",
++             addr, (void *)(UINT_PTR)base, (void *)(UINT_PTR)(base + size),
++             (unsigned int)info.protection, (unsigned int)info.max_protection );
++}
++#else
++static void add_main_image_reserved_area( void ) { }
++static void describe_mach_region( void *addr ) { }
++#endif
+ 
+ static void mmap_remove_reserved_area( void *addr, SIZE_T size )
+ {
+@@ -615,7 +713,31 @@
      }
      else
      {
@@ -16,8 +128,8 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 +         *                              even though nothing is mapped in it
 +         * Wine turned the first into ENOMEM through the ternary this replaces and the
 +         * second into ENOMEM unconditionally, and try_map_free_area() stops at any
-+         * failure that is not EEXIST instead of stepping on. A process with hundreds
-+         * of free areas above the loader therefore reported as out of memory:
++         * failure that is not EEXIST instead of stepping past it. A process with
++         * hundreds of free areas above the loader therefore reported as out of memory:
 +         *   err:virtual:try_map_free_area mmap() error Cannot allocate memory,
 +         *   range 0x100000000-0x100030000, unix_prot 0.
 +         * The three address-related refusals all mean "this address is not usable",
@@ -34,30 +146,31 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
          ptr = MAP_FAILED;
      }
  #else
-@@ -2032,7 +2056,21 @@
+@@ -2032,7 +2154,22 @@
          else if (use_kernel_writewatch && view->protect & VPROT_WRITEWATCH) vprot &= ~VPROT_WRITEWATCH;
          set_page_vprot( base, size, vprot );
      }
 -    return !mprotect_range( base, size, 0, 0 );
 +    if (!mprotect_range( base, size, 0, 0 )) return TRUE;
 +
-+    /* Which errno this is decides what the fix is, and two guesses have already been
-+     * wrong. map_image_into_view() reported that it could not set 60000020
-+     * (PAGE_EXECUTE_READ) on the load test's .text section, and tests/wine/exec_probe.c
-+     * measured that a plain process on this machine can put PROT_EXEC on an anonymous
-+     * page and on a mapping of that same .exe and then run code written into it -- so
-+     * "this platform does not allow it" is ruled out, and the answer is in the errno
-+     * rather than in the permission. */
++    /* Which errno this is decides what the fix is, and whether the range is mapped
++     * at all is the rest of it. The run at 5d1ed0f printed
++     *   arm64 set_vprot: mprotect to 0x1 failed for 0x140000000-0x140001000, errno 13
++     * for the load test's own ImageBase, and tests/wine/exec_probe.c measures that a
++     * process on this machine can put PROT_EXEC on a private and on a shared mapping
++     * of that same .exe and run code written into it, so the pages are usable in
++     * general and this is about where they are. */
 +    {
 +        int saved = errno;
 +        ERR( "arm64 set_vprot: mprotect to %#x failed for %p-%p, errno %d (%s)\n",
 +             get_unix_prot( vprot ), base, (char *)base + size, saved, strerror( saved ) );
++        describe_mach_region( base );
 +    }
 +    return FALSE;
  }
  
  
-@@ -3700,6 +3738,31 @@
+@@ -3700,7 +3837,38 @@
          for (i = 0; (*preload_info)[i].size; i++)
              mmap_add_reserved_area( (*preload_info)[i].addr, (*preload_info)[i].size );
  
@@ -78,8 +191,8 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 +     * probe measured this platform granting.
 +     *
 +     * It is deliberately not mapped here. The first attempt reserved it with mmap,
-+     * and map_fixed_area() then refused it with STATUS_CONFLICTING_ADDRESSES -- not
-+     * from the limit checks, which the line below shows passing, but from
++     * and map_fixed_area() then refused it with STATUS_CONFLICTING_ADDRESSES, not from
++     * the limit checks, which the line below shows passing, but from
 +     * anon_mmap_tryfixed() finding the range already taken and reporting EEXIST. The
 +     * address has to be free for Wine to map its page into it, so it is left free. */
 +    user_shared_data = (void *)0x7ff000000000;
@@ -87,5 +200,12 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 +         user_shared_data, host_addr_space_limit, user_space_limit, address_space_limit );
 +#endif
      mmap_init( preload_info ? *preload_info : NULL );
++#if defined(__APPLE__)
++    /* The loader's own window, registered from the executable's header. Without
++     * it Wine hands a PE image an ImageBase inside a window this kernel refuses to
++     * map, or to change the protections of; the measurement is in the function. */
++    add_main_image_reserved_area();
++#endif
  
      if ((preload = getenv("WINEPRELOADRESERVE")))
+     {

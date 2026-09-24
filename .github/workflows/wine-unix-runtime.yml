@@ -294,27 +294,25 @@ jobs:
           after_refs=$(grep -c 'pagezero_size\|segalign\|__info_plist' Makefile 2>/dev/null || echo 0)
           echo "references in the link line: $before_refs before, $after_refs after"
 
-          # Wine sets -segalign,0x1000,-pagezero_size,0x1000 for this platform, and
-          # the host page here is 16KB, which is why the values are 0x4000 -- Wine's
-          # own step above rewrites them to exactly that for this machine. The removal
-          # earlier in this workflow left the line as a bare -Wl, so both flags are
-          # set here rather than inherited. The
-          # second one is the reason this step matters: pagezero defaults to 4GB, a
-          # slidable, unmappable region, and the previous run measured what that costs
-          # inside it --
+          # The flags stay removed and the reason is measured, not assumed: setting
+          # WINELOADER_LDFLAGS to -Wl,-segalign,0x4000,-pagezero_size,0x4000 changed
+          # the hash of the relinked loader and left its layout exactly as it was, so
+          # the variable does not reach the link line. The layout that runs is the
+          # default one, and the previous run measured what it costs --
+          #   --- no low-address flags: pagezero=0x0 size=0x0000000100000000 text=0x100000000
           #   mach ret 1 (KERN_INVALID_ADDRESS) at 0x100000000-0x100030000
           #   arm64 set_vprot: mprotect to 0x1 failed for 0x140000000-0x140001000,
           #   errno 13 (Permission denied)
-          # 0x140000000 is the load test's own ImageBase, and with a 4GB pagezero the
-          # loader's own image reserves that whole window. tests/wine/exec_probe.c
-          # measures that a process with a 4KB pagezero can put PROT_EXEC on a private
-          # and on a shared mapping of that same .exe, so the pages are not the
-          # platform refusing: they are inside the reservation. The loader layout is
-          # printed below with pagezero included, so this is read and not assumed.
+          # 0x140000000 is the load test's own ImageBase. Changing the layout is not
+          # the fix: a small pagezero is a loader this kernel kills at launch, which an
+          # earlier run in this workflow wrote down. The window the default layout puts
+          # around the ImageBase is registered inside Wine instead, by
+          # add_main_image_reserved_area() in the patch, which reads the executable's
+          # own header. The ERR line it prints and the probe below are the numbers.
           for mk in Makefile loader/Makefile; do
             [ -f "$mk" ] || continue
             if grep -q '^WINELOADER_LDFLAGS' "$mk"; then
-              sed -i '' -e 's|^WINELOADER_LDFLAGS *=.*$|WINELOADER_LDFLAGS = -Wl,-segalign,0x4000,-pagezero_size,0x4000|' "$mk"
+              sed -i '' -e 's|^WINELOADER_LDFLAGS *=.*$|WINELOADER_LDFLAGS =|' "$mk"
               echo "--- $mk: $(grep -m1 '^WINELOADER_LDFLAGS' "$mk")"
             fi
           done
@@ -595,6 +593,19 @@ jobs:
             fi
           else
             echo "the executable memory probe did not compile, see above" | tee -a "$out"
+          fi
+
+          # Where this machine lets a process put a mapping, GB by GB from the 4GB
+          # line. The loader's pagezero was measured at 4GB, and a window that cannot
+          # be mapped or have its protections changed is what the PE ImageBase fell
+          # into; this says which addresses are inside it, which is the measurement the
+          # reserved window registration in Wine is made of. Addresses that are granted
+          # are unmapped again, so the process is left as it was found.
+          echo "=== which addresses this machine lets a process map ===" | tee -a "$out"
+          if /usr/bin/clang "$GITHUB_WORKSPACE/tests/wine/window_probe.c" -o "$RUNNER_TEMP/window_probe" >> "$out" 2>&1; then
+            "$RUNNER_TEMP/window_probe" >> "$out" 2>&1
+          else
+            echo "the window probe did not compile, see above" | tee -a "$out"
           fi
 
           set +e
