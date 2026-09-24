@@ -1,0 +1,144 @@
+# winemetal dispatch slot	metal4 disposition	note
+#
+# Describes research/dxmt at the revision this tree records: b4b89f0a5a1752da3982a7b6c5575506024bf253
+# (WMT_API_COUNT = 127). That header is generated from the winemetal unix-call table,
+# so it is the exact Metal surface DXMT can reach -- and therefore the exact surface a
+# Metal 4 port has to account for.
+#
+# tools/metal4-inventory.py fails if this map and that header disagree, and if the
+# recorded submodule revision moves. Re-classify when either happens.
+#
+# Dispositions:
+#   mtl4-core      creates/submits/encodes work -> MTL4CommandQueue/Buffer/Allocator/Encoder
+#   mtl4-bind      resource binding -> MTL4ArgumentTable (buffers by gpuAddress, textures by gpuResourceID)
+#   mtl4-compile   pipeline/library creation -> MTL4Compiler
+#   shared         same object and selector in Metal 4, keep unchanged
+#   dxmt-internal  not Metal: airconv thunks, DXMT caches, HUD, remote-metal guest helpers
+#   host-only      macOS-host remote-metal path, not on the iOS device path
+NSObject_retain	shared	
+NSObject_release	shared	
+NSArray_object	shared	
+NSArray_count	shared	
+MTLCopyAllDevices	shared	MTL4 has no device object; MTL4CommandQueue/Buffer/Allocator come from this MTLDevice
+MTLDevice_recommendedMaxWorkingSetSize	shared	
+MTLDevice_currentAllocatedSize	shared	
+MTLDevice_name	shared	
+NSString_getCString	shared	
+MTLDevice_newCommandQueue	mtl4-core	MTLDevice -> MTL4CommandQueue (makeCommandQueue(descriptor: MTL4CommandQueueDescriptor))
+NSAutoreleasePool_alloc_init	shared	
+MTLCommandQueue_commandBuffer	mtl4-core	buffer no longer comes from the queue: MTL4CommandBuffer from MTLDevice + MTL4CommandAllocator
+MTLCommandBuffer_commit	mtl4-core	MTL4CommandQueue commit:count: (batch submit, replaces per-buffer commit)
+MTLCommandBuffer_waitUntilCompleted	mtl4-core	MTL4CommitFeedback / completion handler; no per-buffer waitUntilCompleted
+MTLCommandBuffer_status	mtl4-core	MTL4CommitFeedback / MTL4CommitOptions describe completion instead
+MTLDevice_newSharedEvent	shared	
+MTLSharedEvent_signaledValue	shared	
+MTLCommandBuffer_encodeSignalEvent	mtl4-core	queue-level signal on MTL4CommandQueue, not per-buffer encodeSignalEvent
+MTLDevice_newBuffer	shared	MTLBuffer unchanged; Metal 4 binds buffers by gpuAddress
+MTLDevice_newSamplerState	shared	
+MTLDevice_newDepthStencilState	shared	
+MTLDevice_newTexture	shared	MTLTexture unchanged; Metal 4 binds textures by gpuResourceID
+MTLBuffer_newTexture	shared	
+MTLTexture_newTextureView	shared	
+MTLDevice_minimumLinearTextureAlignmentForPixelFormat	shared	
+MTLDevice_newLibrary	mtl4-compile	MTL4Compiler makeLibrary / MTLDevice library creation
+MTLLibrary_newFunction	mtl4-compile	needs MTLFunctionHandle for MTL4 argument-table binding
+NSString_lengthOfBytesUsingEncoding	shared	
+NSObject_description	dxmt-internal	
+MTLDevice_newComputePipelineState	mtl4-compile	MTL4Compiler makeComputePipelineState -> MTLComputePipelineState
+MTLCommandBuffer_blitCommandEncoder	mtl4-core	blit folded into MTL4ComputeCommandEncoder
+MTLCommandBuffer_computeCommandEncoder	mtl4-core	MTL4ComputeCommandEncoder
+MTLCommandBuffer_renderCommandEncoder	mtl4-core	MTL4RenderCommandEncoder
+MTLCommandEncoder_endEncoding	mtl4-core	MTL4 encoders end via endEncoding; the buffer then needs endCommandBuffer
+MTLDevice_newRenderPipelineState	mtl4-compile	MTL4Compiler makeRenderPipelineState -> MTLRenderPipelineState
+MTLDevice_newMeshRenderPipelineState	mtl4-compile	MTL4Compiler mesh pipeline (MTL4PipelineDescriptor)
+MTLBlitCommandEncoder_encodeCommands	mtl4-core	blit copy/fill ops re-encoded on MTL4ComputeCommandEncoder
+MTLComputeCommandEncoder_encodeCommands	mtl4-bind	wmtcmd_compute_* list -> MTL4ComputeCommandEncoder + MTL4ArgumentTable writes
+MTLRenderCommandEncoder_encodeCommands	mtl4-bind	wmtcmd_render_* list -> MTL4RenderCommandEncoder + MTL4ArgumentTable writes
+MTLTexture_pixelFormat	dxmt-internal	
+MTLTexture_width	shared	
+MTLTexture_height	shared	
+MTLTexture_depth	dxmt-internal	
+MTLTexture_arrayLength	dxmt-internal	
+MTLTexture_mipmapLevelCount	shared	
+MTLTexture_replaceRegion	shared	
+MTLBuffer_didModifyRange	dxmt-internal	
+MTLCommandBuffer_presentDrawable	mtl4-core	MTL4 present path (queue commit with the drawable)
+MTLCommandBuffer_presentDrawableAfterMinimumDuration	dxmt-internal	
+MTLDevice_supportsFamily	shared	
+MTLDevice_supportsBCTextureCompression	shared	
+MTLDevice_supportsTextureSampleCount	shared	
+MTLDevice_hasUnifiedMemory	shared	
+MTLCaptureManager_sharedCaptureManager	dxmt-internal	
+MTLCaptureManager_startCapture	dxmt-internal	
+MTLCaptureManager_stopCapture	dxmt-internal	
+MTLDevice_newTemporalScaler	dxmt-internal	
+MTLDevice_newSpatialScaler	dxmt-internal	
+MTLCommandBuffer_encodeTemporalScale	dxmt-internal	
+MTLCommandBuffer_encodeSpatialScale	dxmt-internal	
+NSString_string	shared	
+NSString_alloc_init	shared	
+DeveloperHUDProperties_instance	dxmt-internal	
+DeveloperHUDProperties_addLabel	dxmt-internal	
+DeveloperHUDProperties_updateLabel	dxmt-internal	
+DeveloperHUDProperties_remove	dxmt-internal	
+MetalDrawable_texture	shared	
+MetalLayer_nextDrawable	shared	
+MTLDevice_supportsFXSpatialScaler	dxmt-internal	
+MTLDevice_supportsFXTemporalScaler	dxmt-internal	
+MetalLayer_setProps	shared	
+MetalLayer_getProps	shared	
+CreateMetalViewFromHWND	shared	
+ReleaseMetalView	shared	
+thunk_SM50Initialize	dxmt-internal	
+thunk_SM50Destroy	dxmt-internal	
+thunk_SM50Compile	dxmt-internal	
+thunk_SM50GetCompiledBitcode	dxmt-internal	
+thunk_SM50DestroyBitcode	dxmt-internal	
+thunk_SM50GetErrorMessage	dxmt-internal	
+thunk_SM50FreeError	dxmt-internal	
+thunk_SM50CompileGeometryPipelineVertex	dxmt-internal	
+thunk_SM50CompileGeometryPipelineGeometry	dxmt-internal	
+<null slot>	dxmt-internal	
+thunk_SM50CompileTessellationPipelineHull	dxmt-internal	
+thunk_SM50CompileTessellationPipelineDomain	dxmt-internal	
+MTLCommandEncoder_setLabel	shared	
+MTLDevice_setShouldMaximizeConcurrentCompilation	shared	
+thunk_SM50GetArgumentsInfo	dxmt-internal	
+MTLCommandBuffer_error	dxmt-internal	
+MTLCommandBuffer_logs	dxmt-internal	
+MTLLogContainer_enumerate	dxmt-internal	
+CGColorSpace_checkColorSpaceSupported	host-only	
+MetalLayer_setColorSpace	host-only	
+WMTGetPrimaryDisplayId	shared	
+WMTGetSecondaryDisplayId	host-only	
+WMTGetDisplayDescription	shared	
+MetalLayer_getEDRValue	shared	
+MTLLibrary_newFunctionWithConstants	mtl4-compile	MTL4Compiler function specialization (MTL4PipelineStageDynamicLinkingDescriptor)
+WMTQueryDisplaySetting	host-only	
+WMTUpdateDisplaySetting	host-only	
+WMTQueryDisplaySettingForLayer	shared	
+MTLCommandBuffer_encodeWaitForEvent	mtl4-core	queue-level wait on MTL4CommandQueue
+MTLSharedEvent_signalValue	dxmt-internal	
+MTLSharedEvent_setWin32EventAtValue	dxmt-internal	
+MTLDevice_newFence	dxmt-internal	
+MTLDevice_newEvent	dxmt-internal	
+MTLBuffer_updateContents	shared	
+SharedEventListener_create	shared	
+SharedEventListener_start	shared	
+SharedEventListener_destroy	shared	
+WMTGetOSVersion	shared	
+MTLDevice_newBinaryArchive	dxmt-internal	
+MTLBinaryArchive_serialize	dxmt-internal	
+DispatchData_alloc_init	shared	
+CacheReader_alloc_init	dxmt-internal	
+CacheReader_get	dxmt-internal	
+CacheWriter_alloc_init	dxmt-internal	
+CacheWriter_set	dxmt-internal	
+WMTSetMetalShaderCachePath	mtl4-compile	MTL4 pipeline data set serializer (MTL4Compiler pipelineDataSetSerializer)
+MTLDevice_newSharedTexture	shared	
+WMTBootstrapRegister	host-only	
+WMTBootstrapLookUp	host-only	
+MTLSharedEvent_createMachPort	host-only	
+MTLDevice_newSharedEventWithMachPort	host-only	
+MTLDevice_registryID	shared	
+MTLSharedEvent_waitUntilSignaledValue	dxmt-internal	

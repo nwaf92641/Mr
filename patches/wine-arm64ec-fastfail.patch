@@ -1,0 +1,35 @@
+--- a/include/winnt.h
++++ b/include/winnt.h
+@@ -7461,7 +7461,7 @@
+ static FORCEINLINE LONG WINAPI InterlockedExchange( LONG volatile *dest, LONG val )
+ {
+     LONG ret;
+-#if (__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 7))
++#if (__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 7)) || defined(__clang__)
+     ret = __atomic_exchange_n( dest, val, __ATOMIC_SEQ_CST );
+ #elif defined(__i386__) || defined(__x86_64__)
+     __asm__ __volatile__( "lock; xchgl %0,(%1)"
+@@ -7520,7 +7520,7 @@
+ static FORCEINLINE void * WINAPI InterlockedExchangePointer( void *volatile *dest, void *val )
+ {
+     void *ret;
+-#if (__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 7))
++#if (__GNUC__ > 4) || ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 7)) || defined(__clang__)
+     ret = __atomic_exchange_n( dest, val, __ATOMIC_SEQ_CST );
+ #elif defined(__x86_64__)
+     __asm__ __volatile__( "lock; xchgq %0,(%1)" : "=r" (ret) :"r" (dest), "0" (val) : "memory" );
+@@ -7636,11 +7636,11 @@
+ 
+ static FORCEINLINE DECLSPEC_NORETURN void __fastfail(unsigned int code)
+ {
+-#if defined(__x86_64__) || defined(__i386__)
+-    for (;;) __asm__ __volatile__( "int $0x29" :: "c" ((ULONG_PTR)code) : "memory" );
+-#elif defined(__aarch64__)
++#if defined(__aarch64__) || defined(__arm64ec__)
+     register ULONG_PTR val __asm__("x0") = code;
+     for (;;) __asm__ __volatile__( "brk #0xf003" :: "r" (val) : "memory" );
++#elif defined(__x86_64__) || defined(__i386__)
++    for (;;) __asm__ __volatile__( "int $0x29" :: "c" ((ULONG_PTR)code) : "memory" );
+ #elif defined(__arm__)
+     register ULONG_PTR val __asm__("r0") = code;
+     for (;;) __asm__ __volatile__( "udf #0xfb" :: "r" (val) : "memory" );

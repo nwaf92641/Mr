@@ -1,0 +1,61 @@
+name: Metal 4 layer
+
+# Compiles graphics/metal4 against the iOS SDK in about a minute.
+#
+# The same sources are compiled by build/dxmt-ios/build.sh inside the IPA
+# pipeline, but only after FEX, GnuTLS, LLVM 15 and Wine have been built --
+# roughly three hours in. A wrong MTL4 selector is a one-line fix and should not
+# cost a three-hour run to discover, so it is checked here first.
+#
+# This job proves the layer compiles and archives. It cannot prove Metal 4
+# renders: the hosted runners have no GPU reporting MTLGPUFamilyMetal4, and
+# graphics/metal4/mr_metal4_milestone.mm is what answers that on a device.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "graphics/metal4/**"
+      - "tools/check-metal4.sh"
+      - "build/dxmt-ios/build.sh"
+      - ".github/workflows/metal4.yml"
+  pull_request:
+    paths:
+      - "graphics/metal4/**"
+      - "tools/check-metal4.sh"
+      - "build/dxmt-ios/build.sh"
+      - ".github/workflows/metal4.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metal4-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: Compile against the iOS SDK
+    runs-on: macos-15
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      # Printed before the check runs, so a SKIP can be told apart from a pass
+      # when reading the log: an image without Xcode 26 has no Metal 4 headers to
+      # compile against and the script exits 0.
+      - name: Report the toolchain
+        run: |
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "no Xcode under /Applications"
+          xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "no iphoneos SDK"
+
+      - name: Compile the Metal 4 layer
+        run: tools/check-metal4.sh

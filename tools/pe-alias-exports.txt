@@ -1,0 +1,78 @@
+# Required exports for each alias in app/Madeira/DLLAliases.h.
+#
+# An alias points a module name a title imports at a module the bundle ships.
+# That is only safe when every symbol the aliased-away module exported is present
+# in the target -- otherwise the module loads and the import fails, which is a
+# partial load rather than a clean "cannot find x.dll".
+#
+# Format: `REF <alias-stem> <target-stem>`, then one export name per line,
+# indented, until the next REF or end of file.
+#
+# The sets here are not copied by hand. They are the exports of the real modules
+# the alias stands in for, taken from the authoritative definitions:
+#
+#   d3dcompiler_44/45 -- Microsoft's d3dcompiler_44 and _45 shipped inside the
+#     Windows SDK and appear in no redistributable, so there is no DLL to read.
+#     Their surface is bracketed by the two neighbouring generations, and both
+#     brackets are strict subsets of the target: d3dcompiler_43 comes from the
+#     DirectX redistributable and d3dcompiler_46 from Wine's model of it. The
+#     union of those two is the required set below.
+#
+# Regenerate with tools/gen-alias-exports.py, which reads the Wine tree and the
+# redistributable component and writes this file.
+
+REF d3dcompiler_44 d3dcompiler_47
+#   Wine specs: d3dcompiler_43 (DirectX redistributable) union d3dcompiler_46
+    D3DAssemble
+    D3DCompile
+    D3DCompile2
+    D3DCompileFromFile
+    D3DCompressShaders
+    D3DCreateBlob
+    D3DDecompressShaders
+    D3DDisassemble
+    D3DDisassemble10Effect
+    D3DDisassemble11Trace
+    D3DDisassembleRegion
+    D3DGetBlobPart
+    D3DGetDebugInfo
+    D3DGetInputAndOutputSignatureBlob
+    D3DGetInputSignatureBlob
+    D3DGetOutputSignatureBlob
+    D3DGetTraceInstructionOffsets
+    D3DPreprocess
+    D3DReadFileToBlob
+    D3DReflect
+    D3DReturnFailure1
+    D3DSetBlobPart
+    D3DStripShader
+    D3DWriteBlobToFile
+    DebugSetMute
+
+REF d3dcompiler_45 d3dcompiler_47
+#   Wine specs: d3dcompiler_43 (DirectX redistributable) union d3dcompiler_46
+    D3DAssemble
+    D3DCompile
+    D3DCompile2
+    D3DCompileFromFile
+    D3DCompressShaders
+    D3DCreateBlob
+    D3DDecompressShaders
+    D3DDisassemble
+    D3DDisassemble10Effect
+    D3DDisassemble11Trace
+    D3DDisassembleRegion
+    D3DGetBlobPart
+    D3DGetDebugInfo
+    D3DGetInputAndOutputSignatureBlob
+    D3DGetInputSignatureBlob
+    D3DGetOutputSignatureBlob
+    D3DGetTraceInstructionOffsets
+    D3DPreprocess
+    D3DReadFileToBlob
+    D3DReflect
+    D3DReturnFailure1
+    D3DSetBlobPart
+    D3DStripShader
+    D3DWriteBlobToFile
+    DebugSetMute

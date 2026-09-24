@@ -1,0 +1,96 @@
+name: Build IPA (main, unsigned + release)
+
+# The `main`-facing IPA pipeline. It reuses `.github/workflows/ipa.yml` -- the
+# single, proven build (FEX + GnuTLS + Wine unix libs + LLVM 15 + DXMT, then
+# xcodebuild and an unsigned .ipa) -- and adds the two things that workflow
+# deliberately leaves to the caller:
+#
+#   1. Triggers for the default branch and for pull requests against it
+#      (`ipa.yml` only runs on `jit-disconnect-hardening` and `workflow_dispatch`),
+#      so every change that can reach `main` is packaged.
+#   2. A GitHub Release carrying the resulting IPA, published only on a direct
+#      push or a manual run -- never from a pull request, whose artifacts are
+#      for validation, not distribution.
+#
+# The artifact is still uploaded by `ipa.yml` itself (`Madeira-unsigned-ipa`),
+# so a PR run is downloadable from its Actions page; the release job below just
+# re-publishes it with a stable tag.
+#
+# Authentication: the release uses `secrets.GH_TOKEN` when a PAT is configured,
+# otherwise the run's own `GITHUB_TOKEN` (which already has `contents: write`
+# here). No token is embedded in the workflow.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-ipa.yml"
+      - ".github/workflows/ipa.yml"
+      - "app/**"
+      - "scripts/**"
+      - "build/**"
+      - "tools/**"
+      - "patches/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-ipa.yml"
+      - ".github/workflows/ipa.yml"
+      - "app/**"
+      - "scripts/**"
+      - "build/**"
+      - "tools/**"
+      - "patches/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    name: Build unsigned IPA
+    uses: ./.github/workflows/ipa.yml
+    secrets: inherit
+
+  release:
+    name: Publish GitHub release
+    if: github.event_name != 'pull_request'
+    needs: ipa
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download IPA
+        uses: actions/download-artifact@v5
+        with:
+          name: Madeira-unsigned-ipa
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          sha="${GITHUB_SHA:0:7}"
+          tag="ipa-$(date -u +%Y%m%d-%H%M%S)-${sha}"
+          cat > release-notes.md <<EOF
+          Unsigned IPA built from ${GITHUB_REPOSITORY}@${GITHUB_REF_NAME} (${sha}).
+
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Sideload with AltStore / Sideloadly / TrollStore, or re-sign it with your own
+          Apple ID. Nothing in the repo signs it -- see scripts/make-ipa.sh.
+
+          The app overlays Microsoft's Visual C++ and DirectX runtime DLLs (from the
+          official redistributables, unmodified) into the Wine session, because Wine's
+          own DirectX helper modules stub the texture-loading entry points a DirectX 9,
+          10 or 11 title calls. Those Microsoft binaries are redistributed under their
+          own terms, recorded in the app's third-party notices.
+          EOF
+          gh release create "$tag" Madeira-unsigned.ipa \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Madeira unsigned IPA — ${sha}" \
+            --notes-file release-notes.md

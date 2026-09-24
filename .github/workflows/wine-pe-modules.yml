@@ -1,0 +1,153 @@
+name: Build Wine PE modules (compat set)
+
+# The standalone builder for the Windows PE modules tools/pe-module-manifest.txt
+# lists. Use it to produce and inspect the set on its own, or to force a rebuild
+# after a Wine revision change, without publishing a release.
+#
+# The IPA workflow (.github/workflows/ipa.yml) builds and caches the same set
+# itself, because a title that cannot load its imports is a title that does not
+# run: the modules are not committed (a few hundred files, valid for one Wine
+# revision only) and an IPA that lacks them is not something to hand to someone.
+# This workflow is the way to produce them on their own and look at them, and it
+# uploads both bundle directories as one artifact.
+#
+# tools/check-pe-module-set.py --strict is the gate at the end: it fails until
+# every `wine` module in the manifest is present, so a green run is a run whose
+# artifact closes the gap.
+#
+# The DLLs must match the Wine revision the workflow records in its summary. A
+# module built against a different revision than the ntdll and kernel32 in the
+# bundle is a version mismatch the loader reports as a crash inside the guest
+# rather than as a build error -- which is why the IPA cache keys on the wine
+# revision, and why committing these by hand is not a thing to do casually.
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild modules that are already present"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/wine-pe-modules.yml"
+      - "scripts/build-wine-pe-modules.sh"
+      - "tools/pe-module-manifest.txt"
+      - "patches/wine-*.patch"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wine-pe-modules-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pe-modules:
+    name: Build the missing Wine PE modules
+    runs-on: macos-15
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_JOBS: 3
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          submodules: false
+
+      - name: Select Xcode and install build tools
+        run: |
+          set -euo pipefail
+          NEWEST="$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [[ -n "$NEWEST" ]]; then
+            sudo xcode-select -s "$NEWEST/Contents/Developer"
+          fi
+          xcodebuild -version
+          brew install cmake ninja meson pkg-config bison flex llvm
+          for package in llvm bison flex; do
+            echo "$(brew --prefix "$package")/bin" >> "$GITHUB_PATH"
+          done
+
+      - name: Fetch submodules (Wine and the native dependencies)
+        run: git submodule update --init --recursive --depth 1
+
+      - name: Record dependency revisions
+        id: revisions
+        run: |
+          echo "wine=$(git -C wine rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "fex=$(git -C FEX rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "dxmt=$(git -C research/dxmt rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # Restore-only, and deliberately keyed exactly as ipa.yml keys its native
+      # cache: a Wine tree configure is ~40 minutes and the two workflows need
+      # the same one. Nothing is saved here, because the IPA job owns that key
+      # and a second writer would race it.
+      - name: Restore the Wine tree and toolchain
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            toolchains/llvm-mingw-20260421-ucrt-macos-universal
+            build/freetype-ios/build
+            research/freetype
+            wine/build-macos
+          key: ipa-native-${{ runner.arch }}-${{ steps.revisions.outputs.fex }}-${{ steps.revisions.outputs.wine }}-${{ steps.revisions.outputs.dxmt }}-${{ hashFiles('scripts/build-fex-ios.sh', 'scripts/prepare-wine-ios.sh', 'patches/fex-ios-arm64-mbi.patch', 'build/gnutls-ios/build.sh', 'build/gnutls-ios/src/SHA256SUMS', 'build/freetype-ios/build.sh') }}
+          restore-keys: |
+            ipa-native-${{ runner.arch }}-${{ steps.revisions.outputs.fex }}-${{ steps.revisions.outputs.wine }}-
+
+      - name: Configure the Wine tree
+        run: bash scripts/prepare-wine-ios.sh 2>&1 | tee wine-prepare-build.log
+
+      - name: Build the missing PE modules
+        run: |
+          set -euo pipefail
+          # macOS still ships bash 3.2, where expanding an empty array under
+          # `set -u` aborts; the guarded expansion keeps the no-flag path clean.
+          args=()
+          if [[ "${{ inputs.force }}" == "true" ]]; then
+            args+=(--force)
+          fi
+          bash scripts/build-wine-pe-modules.sh ${args[@]+"${args[@]}"} \
+            2>&1 | tee wine-pe-modules-build.log
+
+      - name: Fetch the Microsoft DirectX component
+        run: bash tools/fetch-directx.sh 2>&1 | tee directx-build.log
+
+      - name: Verify the manifest is closed
+        run: python3 tools/check-pe-module-set.py --strict
+
+      - name: Package the built modules
+        run: |
+          set -euo pipefail
+          tar -czf wine-pe-modules.tar.gz \
+            app/Madeira/arm64ec-windows app/Madeira/aarch64-windows
+          ls -l wine-pe-modules.tar.gz
+
+      - name: Summary
+        run: |
+          {
+            echo "### Wine PE modules"
+            echo
+            echo "- wine revision: \`${{ steps.revisions.outputs.wine }}\`"
+            echo "- commit these DLLs with that revision, or the loader will find"
+            echo "  modules from a different build than the ntdll it is running on."
+            echo
+            echo '```'
+            python3 tools/check-pe-module-set.py
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the built modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: wine-pe-modules
+          path: |
+            wine-pe-modules.tar.gz
+            wine-pe-modules-build.log
+            wine-prepare-build.log
+          if-no-files-found: error
+          retention-days: 30

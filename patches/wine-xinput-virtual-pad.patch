@@ -1,0 +1,322 @@
+diff --git a/dlls/xinput1_3/madeira_xinput.h b/dlls/xinput1_3/madeira_xinput.h
+new file mode 100644
+index 0000000..09a9186
+--- /dev/null
++++ b/dlls/xinput1_3/madeira_xinput.h
+@@ -0,0 +1,54 @@
++/*
++ * Madeira: in-process virtual XInput controller (PE side).
++ *
++ * Madeira.app runs the guest inside its own process (see the app's
++ * WineProcessBridge.m, wine_process_thread) and already produces one merged
++ * controller frame from two sources that both live in the app: the on-screen
++ * pad, and a paired Bluetooth/MFi pad read through GameController. This
++ * header is the ABI across which that frame reaches xinput1_4.dll.
++ *
++ * It is deliberately not a HID device. This tree ships no winedevice.exe, no
++ * plugplay.exe and no winebus.sys, and autostarting winebus on iOS was
++ * measured to wedge the driver host behind the service startup lock, so the
++ * usual route -- present a HID gamepad, let winebus.sys enumerate it and
++ * hidclass/winexinput.sys turn it into an XInput device -- is closed here. A
++ * unix call into the app needs none of those pieces and cannot wedge a
++ * service that is never started.
++ *
++ * The table itself lives in the app (app/Madeira/MadeiraXInput.c) and is
++ * registered by module name in build/ntdll-unix/virtual_ios.c
++ * load_builtin_unixlib. The app's mirror of this file is the header
++ * app/Madeira/MadeiraXInput.h -- keep the two in sync.
++ */
++
++#ifndef MADEIRA_XINPUT_H
++#define MADEIRA_XINPUT_H
++
++/* Fixed-width fields on purpose: the PE side is compiled for aarch64 or
++ * arm64ec, the app side for arm64, and this struct crosses between them. */
++struct madeira_pad_state
++{
++    unsigned int packet;         /* bumps only when a field below changes */
++    unsigned short buttons;      /* XINPUT_GAMEPAD_* */
++    unsigned char left_trigger;  /* XINPUT_GAMEPAD.bLeftTrigger */
++    unsigned char right_trigger; /* XINPUT_GAMEPAD.bRightTrigger */
++    short thumb_lx, thumb_ly, thumb_rx, thumb_ry;
++};
++
++struct madeira_pad_rumble
++{
++    unsigned short left, right;  /* XINPUT_VIBRATION motors, 0..65535 */
++};
++
++enum madeira_pad_funcs
++{
++    /* const struct madeira_pad_state * --> STATUS_SUCCESS when the app has a
++     * controller to report, STATUS_DEVICE_NOT_CONNECTED when it has none
++     * (the on-screen pad is switched off and no physical pad is paired). */
++    madeira_pad_get_state = 0,
++    /* const struct madeira_pad_rumble * --> best effort, always succeeds. */
++    madeira_pad_set_rumble,
++    madeira_pad_funcs_count,
++};
++
++#endif /* MADEIRA_XINPUT_H */
+diff --git a/dlls/xinput1_3/main.c b/dlls/xinput1_3/main.c
+index a175e54..c7ad1dc 100644
+--- a/dlls/xinput1_3/main.c
++++ b/dlls/xinput1_3/main.c
+@@ -43,6 +43,8 @@
+ #include "xinput.h"
+ 
+ #include "wine/debug.h"
++#include "wine/unixlib.h"
++#include "madeira_xinput.h"
+ 
+ DEFINE_GUID(GUID_DEVINTERFACE_WINEXINPUT,0x6c53d5fd,0x6480,0x440f,0xb6,0x18,0x47,0x67,0x50,0xc5,0xe1,0xa6);
+ 
+@@ -789,6 +791,143 @@ static void controller_unlock(struct xinput_controller *controller)
+     LeaveCriticalSection(&controller->crit);
+ }
+ 
++/* Its keystroke replay is check_for_keystroke_unlocked(), the HID path's own
++ * transition tracker, which is defined below. */
++static DWORD check_for_keystroke_unlocked(struct xinput_controller *controller, const DWORD index,
++                                          XINPUT_KEYSTROKE *keystroke);
++
++/* -------------------------------------------------------------------------
++ * Madeira: the app's virtual controller.
++ *
++ * The app publishes one merged frame -- on-screen pad plus a paired
++ * Bluetooth/MFi pad -- and this module serves it as player 0, through the
++ * same XINPUT_STATE / XINPUT_KEYSTROKE shapes a HID pad produces, so a game
++ * cannot tell the two apart. It takes precedence over a HID pad in slot 0,
++ * which only matters in a build where both can exist; on iOS nothing else
++ * publishes an XInput device at all.
++ *
++ * Everything here fails closed: on a build whose xinput1_4 has no unix table
++ * registered (upstream Wine, or an app that never calls
++ * madeira_xinput_publish), __wine_init_unix_call() fails in DllMain and this
++ * module behaves exactly as upstream does.
++ * ------------------------------------------------------------------------- */
++
++static BOOL madeira_pad_available;
++static struct xinput_controller madeira_pad_controller; /* .state, .last_keystroke only */
++static CRITICAL_SECTION madeira_pad_crit;
++
++static BOOL madeira_pad_refresh(void)
++{
++    struct madeira_pad_state state;
++    XINPUT_GAMEPAD *pad = &madeira_pad_controller.state.Gamepad;
++
++    if (!madeira_pad_available) return FALSE;
++
++    memset(&state, 0, sizeof(state));
++    if (WINE_UNIX_CALL(madeira_pad_get_state, &state)) return FALSE;
++
++    madeira_pad_controller.state.dwPacketNumber = state.packet;
++    pad->wButtons = state.buttons;
++    pad->bLeftTrigger = state.left_trigger;
++    pad->bRightTrigger = state.right_trigger;
++    pad->sThumbLX = state.thumb_lx;
++    pad->sThumbLY = state.thumb_ly;
++    pad->sThumbRX = state.thumb_rx;
++    pad->sThumbRY = state.thumb_ry;
++    return TRUE;
++}
++
++/* TRUE while the app has a controller in player slot 0. */
++static BOOL madeira_pad_present(DWORD index)
++{
++    BOOL present;
++
++    if (index != 0 || !madeira_pad_available) return FALSE;
++
++    EnterCriticalSection(&madeira_pad_crit);
++    present = madeira_pad_refresh();
++    LeaveCriticalSection(&madeira_pad_crit);
++    return present;
++}
++
++static BOOL madeira_pad_state(DWORD index, XINPUT_STATE *state)
++{
++    if (index != 0 || !state || !madeira_pad_available) return FALSE;
++
++    EnterCriticalSection(&madeira_pad_crit);
++    if (!madeira_pad_refresh())
++    {
++        LeaveCriticalSection(&madeira_pad_crit);
++        return FALSE;
++    }
++    *state = madeira_pad_controller.state;
++    LeaveCriticalSection(&madeira_pad_crit);
++    return TRUE;
++}
++
++/* XUSER_INDEX_ANY maps to slot 0: the app's pad is the only slot it fills. */
++static BOOL madeira_pad_keystroke(DWORD index, XINPUT_KEYSTROKE *keystroke)
++{
++    BOOL found;
++
++    if ((index != 0 && index != XUSER_INDEX_ANY) || !madeira_pad_available) return FALSE;
++
++    EnterCriticalSection(&madeira_pad_crit);
++    found = madeira_pad_refresh() &&
++            check_for_keystroke_unlocked(&madeira_pad_controller, 0, keystroke) == ERROR_SUCCESS;
++    LeaveCriticalSection(&madeira_pad_crit);
++    return found;
++}
++
++static BOOL madeira_pad_rumble(DWORD index, const XINPUT_VIBRATION *vibration)
++{
++    struct madeira_pad_rumble rumble;
++
++    if (index != 0 || !vibration || !madeira_pad_present(index)) return FALSE;
++
++    rumble.left = vibration->wLeftMotorSpeed;
++    rumble.right = vibration->wRightMotorSpeed;
++    WINE_UNIX_CALL(madeira_pad_set_rumble, &rumble);
++    return TRUE;
++}
++
++static BOOL madeira_pad_battery(DWORD index, XINPUT_BATTERY_INFORMATION *battery)
++{
++    if (!battery || !madeira_pad_present(index)) return FALSE;
++
++    memset(battery, 0, sizeof(*battery));
++    battery->BatteryType = BATTERY_TYPE_WIRED;
++    battery->BatteryLevel = BATTERY_LEVEL_FULL;
++    return TRUE;
++}
++
++/* A full Xbox 360 pad's capabilities, ids included: plenty of titles key
++ * behaviour off VendorId/ProductId, and 0x045e/0x028e is the pad they expect.
++ * The masks mirror what controller_check_caps() derives from a real pad's HID
++ * descriptor (0xffff buttons, one full-scale trigger and stick per axis). */
++static BOOL madeira_pad_caps(DWORD index, XINPUT_CAPABILITIES_EX *caps)
++{
++    if (index != 0 || !caps || !madeira_pad_present(index)) return FALSE;
++
++    memset(caps, 0, sizeof(*caps));
++    caps->Capabilities.Type = XINPUT_DEVTYPE_GAMEPAD;
++    caps->Capabilities.SubType = XINPUT_DEVSUBTYPE_GAMEPAD;
++    caps->Capabilities.Flags = XINPUT_CAPS_FFB_SUPPORTED;
++    caps->Capabilities.Gamepad.wButtons = 0xffff;
++    caps->Capabilities.Gamepad.bLeftTrigger = 0xff;
++    caps->Capabilities.Gamepad.bRightTrigger = 0xff;
++    caps->Capabilities.Gamepad.sThumbLX = 0xffff;
++    caps->Capabilities.Gamepad.sThumbLY = 0xffff;
++    caps->Capabilities.Gamepad.sThumbRX = 0xffff;
++    caps->Capabilities.Gamepad.sThumbRY = 0xffff;
++    caps->Capabilities.Vibration.wLeftMotorSpeed = 0xff;
++    caps->Capabilities.Vibration.wRightMotorSpeed = 0xff;
++    caps->VendorId = 0x045e;
++    caps->ProductId = 0x028e;
++    caps->VersionNumber = 0x0114;
++    return TRUE;
++}
++
+ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
+ {
+     TRACE("inst %p, reason %lu, reserved %p.\n", inst, reason, reserved);
+@@ -798,6 +937,12 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
+     case DLL_PROCESS_ATTACH:
+         xinput_instance = inst;
+         DisableThreadLibraryCalls(inst);
++        /* Madeira: bind to the app's controller table, if this build has one.
++         * The call fails on any tree that does not register a unix table for
++         * this module, and then nothing below does anything. */
++        if (__wine_init_unix_call()) WARN("no Madeira controller table, HID pads only\n");
++        else madeira_pad_available = TRUE;
++        InitializeCriticalSection(&madeira_pad_crit);
+         break;
+     }
+     return TRUE;
+@@ -830,9 +975,12 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputSetState(DWORD index, XINPUT_VIBRATION *vib
+ 
+     TRACE("index %lu, vibration %p.\n", index, vibration);
+ 
++    if (index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
++
+     start_update_thread();
+ 
+-    if (index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
++    if (madeira_pad_rumble(index, vibration)) return ERROR_SUCCESS;
++
+     if (!controller_lock(&controllers[index])) return ERROR_DEVICE_NOT_CONNECTED;
+ 
+     ret = HID_set_state(&controllers[index], vibration);
+@@ -848,6 +996,11 @@ static DWORD xinput_get_state(DWORD index, XINPUT_STATE *state)
+ {
+     if (!state) return ERROR_BAD_ARGUMENTS;
+ 
++    /* Madeira: player 0 is the app's pad while it has one. Checked before the
++     * HID update thread is started, so a session that only ever uses the
++     * on-screen pad never creates the device-notification window at all. */
++    if (madeira_pad_state(index, state)) return ERROR_SUCCESS;
++
+     start_update_thread();
+ 
+     if (index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
+@@ -973,9 +1126,9 @@ static BOOL trigger_is_on(const BYTE value)
+     return value > 30;
+ }
+ 
+-static DWORD check_for_keystroke(const DWORD index, XINPUT_KEYSTROKE *keystroke)
++static DWORD check_for_keystroke_unlocked(struct xinput_controller *controller, const DWORD index,
++                                          XINPUT_KEYSTROKE *keystroke)
+ {
+-    struct xinput_controller *controller = &controllers[index];
+     const XINPUT_GAMEPAD *cur;
+     DWORD ret = ERROR_EMPTY;
+     int i;
+@@ -1002,8 +1155,6 @@ static DWORD check_for_keystroke(const DWORD index, XINPUT_KEYSTROKE *keystroke)
+         /* note: guide button does not send an event */
+     };
+ 
+-    if (!controller_lock(controller)) return ERROR_DEVICE_NOT_CONNECTED;
+-
+     cur = &controller->state.Gamepad;
+ 
+     /*** buttons ***/
+@@ -1069,6 +1220,18 @@ static DWORD check_for_keystroke(const DWORD index, XINPUT_KEYSTROKE *keystroke)
+         goto done;
+ 
+ done:
++    return ret;
++}
++
++static DWORD check_for_keystroke(const DWORD index, XINPUT_KEYSTROKE *keystroke)
++{
++    struct xinput_controller *controller = &controllers[index];
++    DWORD ret;
++
++    if (!controller_lock(controller)) return ERROR_DEVICE_NOT_CONNECTED;
++
++    ret = check_for_keystroke_unlocked(controller, index, keystroke);
++
+     controller_unlock(controller);
+ 
+     return ret;
+@@ -1080,6 +1243,8 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputGetKeystroke(DWORD index, DWORD reserved, P
+ 
+     if (index >= XUSER_MAX_COUNT && index != XUSER_INDEX_ANY) return ERROR_BAD_ARGUMENTS;
+ 
++    if (madeira_pad_keystroke(index, keystroke)) return ERROR_SUCCESS;
++
+     if (index == XUSER_INDEX_ANY)
+     {
+         int i;
+@@ -1122,6 +1287,7 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputGetBatteryInformation(DWORD index, BYTE typ
+     if (!once++) FIXME("index %lu, type %u, battery %p.\n", index, type, battery);
+ 
+     if (index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
++    if (madeira_pad_battery(index, battery)) return ERROR_SUCCESS;
+     if (!controllers[index].device) return ERROR_DEVICE_NOT_CONNECTED;
+ 
+     return ERROR_NOT_SUPPORTED;
+@@ -1138,6 +1304,8 @@ DWORD WINAPI DECLSPEC_HOTPATCH XInputGetCapabilitiesEx(DWORD unk, DWORD index, D
+ 
+     if (index >= XUSER_MAX_COUNT) return ERROR_BAD_ARGUMENTS;
+ 
++    if (madeira_pad_caps(index, caps)) return ERROR_SUCCESS;
++
+     if (!controller_lock(&controllers[index])) return ERROR_DEVICE_NOT_CONNECTED;
+ 
+     if (flags & XINPUT_FLAG_GAMEPAD && controllers[index].caps.SubType != XINPUT_DEVSUBTYPE_GAMEPAD)

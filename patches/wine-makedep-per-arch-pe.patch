@@ -1,0 +1,41 @@
+diff --git a/tools/makedep.c b/tools/makedep.c
+index 52cf1963d1..318183c369 100644
+--- a/tools/makedep.c
++++ b/tools/makedep.c
+@@ -4837,7 +4837,7 @@ int main( int argc, char *argv[] )
+ {
+     const char *makeflags = getenv( "MAKEFLAGS" );
+     const char *target;
+-    unsigned int i, j, arch, ec_arch;
++    unsigned int i, j, arch;
+ 
+     if (makeflags) parse_makeflags( makeflags );
+ 
+@@ -4922,13 +4922,20 @@ int main( int argc, char *argv[] )
+     strarray_add( &archs, get_expanded_make_variable( top_makefile, "HOST_ARCH" ));
+     strarray_addall( &archs, get_expanded_make_var_array( top_makefile, "PE_ARCHS" ));
+ 
+-    /* check for ARM64X setup */
+-    if ((ec_arch = find_pe_arch( "arm64ec" )) && (arch = find_pe_arch( "aarch64" )))
+-    {
+-        native_archs[ec_arch] = arch;
+-        hybrid_archs[arch] = ec_arch;
+-        strarray_add( &hybrid_target_flags[ec_arch], "-marm64x" );
+-    }
++    /*
++     * ARM64X pairing is deliberately left off. This tree ships one PE module
++     * set per architecture -- aarch64-windows/ for the native ARM64 session and
++     * arm64ec-windows/ for the ARM64EC session an x64 guest runs in -- and has
++     * no ARM64X hybrid loader that could consume a fused image.
++     *
++     * Pairing hurts rather than helps here: it records arm64ec in
++     * native_archs[], and output_static_lib()/output_import_lib() return early
++     * for an arch named there. The arm64ec import libraries an arm64ec PE link
++     * needs (arm64ec-windows/libwinecrt0.a, libntdll.a, libdbghelp.a) then have
++     * no rule at all -- "make libs/winecrt0/arm64ec-windows/libwinecrt0.a"
++     * dies with "No rule to make target" -- and every other arm64ec output of
++     * the pair collapses into aarch64-windows/ as a "-marm64x" hybrid.
++     */
+ 
+     arch_dirs[0] = "";
+     arch_install_dirs[0] = unix_lib_supported ? strmake( "$(libdir)/wine/%s-unix", archs.str[0] ) : "$(libdir)/wine";

@@ -1,0 +1,235 @@
+# Windows PE modules a DirectX-era title imports that app/Madeira/{arch}-windows
+# does not ship yet.
+#
+# Format: `<kind> <module-stem> <component>`, `#` starts a comment.
+#
+#   wine    -- Wine builds it (dlls/<module>), so scripts/build-wine-pe-modules.sh
+#              produces it from the pinned tree. A missing one is a defect.
+#   native  -- Wine does not implement it at all. The only source is Microsoft's
+#              redistributable, which tools/fetch-directx.sh extracts into
+#              app/Madeira/x86_64-directx/ for the x64 session. Reported by the
+#              build script, never failed: it is a component, not a build.
+#
+# The set is not a guess. Every `wine` row is a DLL named by Winlator's own
+# component definitions (brunodev85/winlator-app a030f552,
+# app/src/main/assets/wincomponents/wincomponents.json) -- a decade of
+# accumulated "this title needs this module" evidence -- cross-checked against
+# what this pinned Wine tree can build (dlls/*/Makefile.in). The component
+# column names the entry that asks for the module, so a failure names its cause.
+# The *-legacy groups and gamecore/video/directshow/mediafoundation/direct2d are
+# additions; each group carries its reason in the comment above it.
+#
+# This file deliberately does not alias. DLLAliases.h used to paper over the
+# d3dx9/d3dx10/d3dcompiler generations with the newest shipped module, which is
+# wrong and measurably so -- see the *-legacy comments. An alias is only allowed
+# where every export of the aliased-away module is present in the target, and
+# tools/check-dll-aliases.py proves that from the real binaries.
+#
+# Inspect the current gap with:
+#   python3 tools/check-pe-module-set.py --report
+
+# --- direct3d ---
+# Winlator's DirectX component. Wine implements a lot of this as stubs -- 19 of
+# d3dx11_43's 44 exports return E_NOTIMPL, including
+# D3DX11CreateShaderResourceViewFromFile{A,W}, which is the call a DX11 title
+# makes to load a texture. The real implementations come from the DirectX
+# redistributable component (tools/fetch-directx.sh, extracted into
+# app/Madeira/x86_64-directx/ and overlaid on the x64 session); the Wine-built
+# modules below are what keeps LoadLibrary from failing when a title asks for a
+# name the redistributable does not carry.
+wine   d3dcompiler_33         direct3d
+wine   d3dcompiler_34         direct3d
+wine   d3dcompiler_35         direct3d
+wine   d3dcompiler_36         direct3d
+wine   d3dcompiler_37         direct3d
+wine   d3dcompiler_38         direct3d
+wine   d3dcompiler_39         direct3d
+wine   d3dcompiler_40         direct3d
+wine   d3dcompiler_41         direct3d
+wine   d3dcompiler_42         direct3d
+wine   d3dcompiler_46         direct3d
+native d3dcsx_42              direct3d
+native d3dcsx_43              direct3d
+native d3dx10                 direct3d
+wine   d3dx10_33              direct3d
+wine   d3dx10_34              direct3d
+wine   d3dx10_35              direct3d
+wine   d3dx10_36              direct3d
+wine   d3dx10_37              direct3d
+wine   d3dx10_38              direct3d
+wine   d3dx10_39              direct3d
+wine   d3dx10_40              direct3d
+wine   d3dx10_41              direct3d
+wine   d3dx10_42              direct3d
+wine   d3dx10_43              direct3d
+wine   d3dx11_42              direct3d
+wine   d3dx11_43              direct3d
+wine   d3dx9_24               direct3d
+wine   d3dx9_25               direct3d
+wine   d3dx9_26               direct3d
+wine   d3dx9_27               direct3d
+wine   d3dx9_28               direct3d
+wine   d3dx9_29               direct3d
+wine   d3dx9_30               direct3d
+wine   d3dx9_31               direct3d
+wine   d3dx9_32               direct3d
+wine   d3dx9_33               direct3d
+wine   d3dx9_34               direct3d
+wine   d3dx9_35               direct3d
+wine   d3dx9_36               direct3d
+wine   d3dx9_37               direct3d
+wine   d3dx9_38               direct3d
+wine   d3dx9_39               direct3d
+wine   d3dx9_40               direct3d
+wine   d3dx9_41               direct3d
+wine   d3dx9_42               direct3d
+
+# --- directmusic ---
+wine   dmband                 directmusic
+wine   dmcompos               directmusic
+wine   dmime                  directmusic
+wine   dmloader               directmusic
+wine   dmscript               directmusic
+wine   dmstyle                directmusic
+wine   dmsynth                directmusic
+wine   dmusic                 directmusic
+wine   dmusic32               directmusic
+wine   dswave                 directmusic
+
+# --- directshow ---
+# DirectShow graph for intro video. quartz is why the build script builds the
+# stdole2/stdole32/activeds/mshtml typelibs before it.
+wine   amstream               directshow
+wine   devenum                directshow
+wine   qasf                   directshow
+wine   qcap                   directshow
+wine   qdvd                   directshow
+wine   qedit                  directshow
+wine   quartz                 directshow
+
+# --- directplay ---
+wine   dplayx                 directplay
+native dpmodemx               directplay
+wine   dpnet                  directplay
+wine   dpnhpast               directplay
+wine   dpnhupnp               directplay
+wine   dpwsockx               directplay
+
+# --- xaudio ---
+wine   x3daudio1_0            xaudio
+wine   x3daudio1_1            xaudio
+wine   x3daudio1_2            xaudio
+wine   x3daudio1_3            xaudio
+wine   x3daudio1_4            xaudio
+wine   x3daudio1_5            xaudio
+wine   x3daudio1_6            xaudio
+wine   xactengine2_0          xaudio
+native xactengine2_1          xaudio
+native xactengine2_10         xaudio
+native xactengine2_2          xaudio
+native xactengine2_3          xaudio
+wine   xactengine2_4          xaudio
+native xactengine2_5          xaudio
+native xactengine2_6          xaudio
+wine   xactengine2_7          xaudio
+native xactengine2_8          xaudio
+wine   xactengine2_9          xaudio
+wine   xactengine3_0          xaudio
+wine   xactengine3_1          xaudio
+wine   xactengine3_2          xaudio
+wine   xactengine3_3          xaudio
+wine   xactengine3_4          xaudio
+wine   xactengine3_5          xaudio
+wine   xactengine3_6          xaudio
+wine   xactengine3_7          xaudio
+native xapofx1_0              xaudio
+wine   xapofx1_1              xaudio
+wine   xapofx1_2              xaudio
+wine   xapofx1_3              xaudio
+wine   xapofx1_4              xaudio
+wine   xaudio2_0              xaudio
+wine   xaudio2_1              xaudio
+wine   xaudio2_2              xaudio
+wine   xaudio2_3              xaudio
+wine   xaudio2_4              xaudio
+wine   xaudio2_5              xaudio
+wine   xaudio2_6              xaudio
+wine   xaudio2_7              xaudio
+wine   xaudio2_8              xaudio
+wine   xaudio2_9              xaudio
+
+# --- vcrun2005 ---
+wine   atl80                  vcrun2005
+wine   msvcm80                vcrun2005
+wine   msvcp80                vcrun2005
+wine   msvcr80                vcrun2005
+wine   vcomp                  vcrun2005
+
+# --- vcrun2010 ---
+wine   atl100                 vcrun2010
+wine   msvcp100               vcrun2010
+wine   msvcr100               vcrun2010
+wine   vcomp100               vcrun2010
+
+# --- wmdecoder ---
+wine   wmadmod                wmdecoder
+wine   wmasf                  wmdecoder
+wine   wmvcore                wmdecoder
+wine   wmvdecod               wmdecoder
+
+# --- d3dcompiler-legacy ---
+# d3dcompiler_37/38/39 export D3DCompileFromMemory, D3DDisassembleCode,
+# D3DDisassembleEffect and D3DGetCodeDebugInfo, which _43 no longer carries, so
+# they get a real module rather than an alias.
+native d3dcompiler_44         d3dcompiler-legacy
+native d3dcompiler_45         d3dcompiler-legacy
+
+# --- gamecore ---
+# Beyond the component definitions: the UI, launcher and legacy-graphics
+# modules a DX11-era title or its launcher imports directly. gdiplus backs
+# nearly every game UI and every .NET launcher; msxml*/riched20/cabinet/msi are
+# installer and launcher paths (Steam, .NET bootstrappers); d3d8/ddraw are the
+# fallback renderer of older titles and of some launchers' own windows.
+wine   atl                    gamecore
+wine   atl90                  gamecore
+wine   cabinet                gamecore
+wine   d3d10                  gamecore
+wine   d3d10_1                gamecore
+wine   d3d8                   gamecore
+wine   d3d8thk                gamecore
+wine   d3dim                  gamecore
+wine   d3drm                  gamecore
+wine   ddraw                  gamecore
+wine   ddrawex                gamecore
+wine   dinput                 gamecore
+wine   gdiplus                gamecore
+wine   msi                    gamecore
+wine   msxml                  gamecore
+wine   msxml2                 gamecore
+wine   msxml3                 gamecore
+wine   msxml4                 gamecore
+wine   msxml6                 gamecore
+wine   riched20               gamecore
+wine   riched32               gamecore
+
+# --- video ---
+# Intro movies and licensed codec paths. A title that plays its intro through
+# the WMV decoder does not start when these are absent.
+wine   avifil32               video
+wine   iccvid                 video
+wine   msrle32                video
+wine   msvfw32                video
+native wmcodecdspuuid         video
+
+# --- mediafoundation ---
+# Media Foundation, used by newer titles and by DXVA2 hardware decode.
+wine   dxva2                  mediafoundation
+wine   evr                    mediafoundation
+wine   mfplay                 mediafoundation
+wine   winedmo                mediafoundation
+
+# --- direct2d ---
+# Direct2D and DirectComposition, which some DX11 titles use for their 2D UI.
+wine   d2d1                   direct2d
+wine   dcomp                  direct2d
+wine   uiribbon               direct2d

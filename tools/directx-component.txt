@@ -1,0 +1,69 @@
+# Microsoft DirectX runtime DLLs to overlay on the x64 session.
+#
+# Format: `<name>` or `<name>  # reason`, one per line. Names are the file names
+# inside Microsoft's DirectX End-User Runtimes redistributable; matching is
+# case-insensitive and the redist's own spelling is kept on disk, because that is
+# what a title's import table carries.
+#
+# tools/fetch-directx.sh downloads the redistributable, extracts these into
+# app/Madeira/x86_64-directx/, and WineProcessBridge.m symlinks them over the
+# ARM64EC builtins when the guest is x64 (the same mechanism, and the same
+# directory layout, as app/Madeira/x86_64-vcruntime).
+#
+# Why this exists at all
+# ----------------------
+# Wine's DirectX helper libraries are reimplementations, and the reimplemented
+# surface is not the surface titles use. Measured from the pinned tree's specs:
+#
+#   d3dx11_43 -- 19 of 44 exports are stubs, including
+#                D3DX11CreateShaderResourceViewFromFile{A,W}, which is the call a
+#                DX11 title makes to load a texture.
+#   d3dx10_43 -- 26 of 176, including D3DX10CreateShaderResourceViewFromFile{A,W},
+#                D3DX10CreateShaderResourceViewFromMemory and
+#                D3DX10PreprocessShaderFrom*
+#   d3dx9_43  -- 64 of 329, but all of them mesh/PRT/patch/X-file APIs; the
+#                texture, effect and math entry points are implemented, so this
+#                one is a quality improvement rather than a fix.
+#
+# A stubbed function returns E_NOTIMPL: the module loads, the title runs, and it
+# fails at the first texture. That is the "missing DLL" symptom the user sees,
+# one level down, so the real Microsoft binaries go in.
+#
+# What is deliberately NOT here
+# -----------------------------
+#   d3d11, dxgi, d3d10core, winemetal, d3d12, d3d9, wined3d
+#       Owned by DXMT and wined3d. Microsoft's versions need a Windows display
+#       driver and would replace the Metal backend with nothing.
+#   xaudio2_*, x3daudio1_*, xapofx1_1..1_5, xactengine2_0/2_4/2_7/2_9,
+#   xactengine3_*
+#       Wine builds real implementations of these with no stubs (xaudio2_7's four
+#       exports are all implemented and the rest of the API is COM vtable), they
+#       are native ARM64EC code, and Microsoft's x64 versions would run through
+#       FEX instead -- slower, and on the x86 -> ARM64EC exception path that
+#       WineProcessBridge.m documents as corrupting the guest stack. The only
+#       audio names here are the ones Wine has no module for at all.
+#   d3dx9_24..42, d3dx10_33..42, d3dx11_42, d3dcompiler_33..42
+#       Wine builds these per version with Microsoft's export set (verified: the
+#       spec of each matches the redistributable DLL exactly, 0 missing). Only the
+#       newest of each family is worth the Microsoft implementation.
+#
+# Adding a name here is not free: it is an x64 module in an ARM64EC process, so
+# it costs a FEX translation of every call into it. Each entry needs the same
+# kind of evidence the ones above have -- a measured stub or a missing module.
+
+d3dx9_43
+d3dx10
+d3dx10_43
+d3dx11_42
+d3dx11_43
+d3dcsx_42
+d3dcsx_43
+d3dcompiler_43
+xapofx1_0
+xactengine2_1
+xactengine2_2
+xactengine2_3
+xactengine2_5
+xactengine2_6
+xactengine2_8
+xactengine2_10
