@@ -49,6 +49,12 @@ jobs:
           fetch-depth: 1
           submodules: false
 
+      # The winemetal MTL4 bridge compiles against DXMT's own headers, so the
+      # submodule has to be present or that source is skipped rather than
+      # checked. Depth 1, no recursion.
+      - name: Fetch the DXMT submodule
+        run: git submodule update --init --depth 1 research/dxmt
+
       # Printed before the check runs, so a SKIP can be told apart from a pass
       # when reading the log: an image without Xcode 26 has no Metal 4 headers to
       # compile against and the script exits 0.
@@ -56,6 +62,13 @@ jobs:
         run: |
           ls -d /Applications/Xcode*.app 2>/dev/null || echo "no Xcode under /Applications"
           xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo "no iphoneos SDK"
+
+      # The real MTL4 signatures, straight out of the SDK headers on the
+      # runner, printed on every run rather than only on failure. This is the
+      # reference the MTL4 code is written from, and having it in the log means
+      # it can be read without a second push.
+      - name: Dump the MTL4 SDK surface
+        run: tools/check-metal4.sh --dump-surface
 
       - name: Compile the Metal 4 layer
         run: tools/check-metal4.sh

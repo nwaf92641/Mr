@@ -17,6 +17,10 @@ set -uo pipefail
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 SRC_DIR="$ROOT/graphics/metal4"
+DUMP_ONLY=0
+if [[ "${1:-}" == "--dump-surface" ]]; then
+    DUMP_ONLY=1
+fi
 
 if ! command -v xcrun >/dev/null 2>&1; then
     echo "check-metal4: SKIP -- no xcrun (this is not a macOS checkout)"
@@ -90,7 +94,29 @@ suspend resume|MTL4RenderEncoderOption
 PATTERNS
 }
 
-for source in mr_metal4.mm mr_metal4_milestone.mm; do
+# --dump-surface prints the SDK's real MTL4 declarations and stops. It is how
+# the signatures this code is written from get into a CI log, on every run, so
+# the next MTL4 call is written from evidence rather than from documentation.
+if [[ "$DUMP_ONLY" == 1 ]]; then
+    dump_surface
+    exit 0
+fi
+
+SOURCES=(mr_metal4.mm mr_metal4_milestone.mm)
+
+# The winemetal MTL4 bridge translates DXMT's serialised command lists, so it
+# includes DXMT's headers. It is only compiled when the submodule is present --
+# a clean clone has an empty submodule and this must not be the reason it fails.
+DXMT_WINEMETAL="$ROOT/research/dxmt/src/winemetal"
+if [[ -f "$DXMT_WINEMETAL/winemetal.h" && -f "$SRC_DIR/mr_metal4_winemetal.mm" ]]; then
+    FLAGS+=(-I"$DXMT_WINEMETAL" -I"$ROOT/research/dxmt/include" -I"$ROOT/research/dxmt/libs")
+    SOURCES+=(mr_metal4_winemetal.mm)
+    echo "check-metal4: DXMT present, compiling the winemetal MTL4 bridge too"
+else
+    echo "check-metal4: research/dxmt absent, skipping the winemetal MTL4 bridge"
+fi
+
+for source in "${SOURCES[@]}"; do
     if ! xcrun --sdk iphoneos clang++ "${FLAGS[@]}" -c "$SRC_DIR/$source" \
             -o "$OBJ_DIR/${source%.mm}.o" 2>"$OBJ_DIR/${source%.mm}.log"; then
         echo "check-metal4: FAIL -- $source does not compile against iPhoneOS $SDK_VERSION" >&2
