@@ -297,6 +297,50 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
                                                cmd->indirect_args_offset)];
       return true;
     }
+    case WMTRenderCommandUpdateFence: {
+      const auto *cmd = (const struct wmtcmd_render_fence_op *)command;
+      id<MTLFence> fence = MR_WMT_OBJ(cmd->fence);
+      if (fence == nil) {
+        break;
+      }
+      /* Metal 4 kept MTLFence and put the stage set on the selector:
+       * updateFence:afterEncoderStages:. The DXMT struct carries one stage set,
+       * which is what both directions need. */
+      [(id<MTL4CommandEncoder>)state.encoder updateFence:fence
+                                      afterEncoderStages:(MTLStages)cmd->stages];
+      return true;
+    }
+    case WMTRenderCommandWaitForFence: {
+      const auto *cmd = (const struct wmtcmd_render_fence_op *)command;
+      id<MTLFence> fence = MR_WMT_OBJ(cmd->fence);
+      if (fence == nil) {
+        break;
+      }
+      [(id<MTL4CommandEncoder>)state.encoder waitForFence:fence
+                                      beforeEncoderStages:(MTLStages)cmd->stages];
+      return true;
+    }
+    case WMTRenderCommandMemoryBarrier: {
+      const auto *cmd = (const struct wmtcmd_render_memory_barrier *)command;
+      /* D3D11 has one barrier notion; Metal 4 splits it into an encoder-local
+       * side and a queue-visible side, and the two-barrier form is the one that
+       * covers both: barrierAfterStages: orders work already encoded in this
+       * encoder, beforeQueueStages: orders what comes after it is submitted.
+       * The DXMT struct's stages_before and stages_after map onto those two
+       * sides. This orders at least as much as D3D11 asked for and never less,
+       * which is the direction to be wrong in: ordering more costs a stall,
+       * ordering less is a race.
+       *
+       * visibilityOptions is passed as 0 rather than by naming an enumerator
+       * that has not been read out of the SDK. vm.scope is not used: the
+       * encoder-local barrier form carries no scope, and inventing one would
+       * claim a guarantee Metal has not been asked for. */
+      [(id<MTL4CommandEncoder>)state.encoder
+          barrierAfterStages:(MTLStages)cmd->stages_before
+           beforeQueueStages:(MTLStages)cmd->stages_after
+          visibilityOptions:(MTL4VisibilityOptions)0];
+      return true;
+    }
     case WMTRenderCommandDraw: {
       const auto *cmd = (const struct wmtcmd_render_draw *)command;
       [state.encoder drawPrimitives:(MTLPrimitiveType)cmd->primitive_type
