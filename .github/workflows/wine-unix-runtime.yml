@@ -225,8 +225,9 @@ jobs:
             otool -l "$1" 2>/dev/null | awk '
               /segname/ { seg = $2 }
               /vmaddr/ { vm = $2 }
-              /vmsize/ { if (seg == "__PAGEZERO") p = $2; if (seg == "__TEXT" && !t) { tv = vm; t = 1 } }
-              END { print "pagezero=" p " text=" tv }'
+              /vmsize/ { if (seg == "__PAGEZERO") { if (!p) p = vm; ps = $2 }
+                         if (seg == "__TEXT" && !t) { tv = vm; t = 1 } }
+              END { print "pagezero=" p " size=" ps " text=" tv }'
           }
 
           echo "--- where the linker flags are written"
@@ -293,20 +294,27 @@ jobs:
           after_refs=$(grep -c 'pagezero_size\|segalign\|__info_plist' Makefile 2>/dev/null || echo 0)
           echo "references in the link line: $before_refs before, $after_refs after"
 
-          # The low-address flags are removed by substring above, which leaves the
-          # "-Wl" prefix on its own; appending to it produced a link command the
-          # compiler refused. The line is rewritten as an empty assignment instead.
-          #
-          # Moving the loader to 0x200000000, the base Wine uses for it on x86_64,
-          # was tried here and dropped: the flag never reached the link line from this
-          # Makefile and the run failed its own assertion with the loader still at
-          # 0x100000000. Wine is told which regions are already mapped instead, in
-          # virtual_init(), which is the same list reserve_area() writes to. The
-          # layout is printed so where the loader sits is read rather than assumed.
+          # Wine sets -segalign,0x1000,-pagezero_size,0x1000 for this platform, and
+          # the host page here is 16KB, which is why the values are 0x4000 -- Wine's
+          # own step above rewrites them to exactly that for this machine. The removal
+          # earlier in this workflow left the line as a bare -Wl, so both flags are
+          # set here rather than inherited. The
+          # second one is the reason this step matters: pagezero defaults to 4GB, a
+          # slidable, unmappable region, and the previous run measured what that costs
+          # inside it --
+          #   mach ret 1 (KERN_INVALID_ADDRESS) at 0x100000000-0x100030000
+          #   arm64 set_vprot: mprotect to 0x1 failed for 0x140000000-0x140001000,
+          #   errno 13 (Permission denied)
+          # 0x140000000 is the load test's own ImageBase, and with a 4GB pagezero the
+          # loader's own image reserves that whole window. tests/wine/exec_probe.c
+          # measures that a process with a 4KB pagezero can put PROT_EXEC on a private
+          # and on a shared mapping of that same .exe, so the pages are not the
+          # platform refusing: they are inside the reservation. The loader layout is
+          # printed below with pagezero included, so this is read and not assumed.
           for mk in Makefile loader/Makefile; do
             [ -f "$mk" ] || continue
             if grep -q '^WINELOADER_LDFLAGS' "$mk"; then
-              sed -i '' -e 's|^WINELOADER_LDFLAGS *=.*$|WINELOADER_LDFLAGS =|' "$mk"
+              sed -i '' -e 's|^WINELOADER_LDFLAGS *=.*$|WINELOADER_LDFLAGS = -Wl,-segalign,0x4000,-pagezero_size,0x4000|' "$mk"
               echo "--- $mk: $(grep -m1 '^WINELOADER_LDFLAGS' "$mk")"
             fi
           done
