@@ -58,6 +58,38 @@ fi
 
 OBJECTS=()
 status=0
+
+# When a compile fails, the useful thing is not the error but the declaration
+# the error is about: MTL4 is new enough that its selectors are not in any
+# reference this repository can reach offline, and guessing a second time would
+# be the same mistake twice. This prints the real signatures out of the SDK
+# headers that are on the runner, so the fix is written from evidence.
+dump_surface() {
+    local headers=("$SDK"/System/Library/Frameworks/Metal.framework/Headers/*.h)
+    local topic pattern
+    while IFS='|' read -r topic pattern; do
+        [[ -n "$topic" ]] || continue
+        echo "check-metal4: --- $topic"
+        grep -nH -E "$pattern" "${headers[@]}" | grep -vE ':[0-9]+: *(\*|//)' | head -14 | sed 's/^/    /'
+    done <<'PATTERNS'
+gpuResourceID|gpuResourceID
+argument table setters|setAddress|setTexture:|setSamplerState:|setBytes:
+MTLRenderStages|MTLRenderStages
+storage mode enums|MTLStorageMode|MTLResourceStorageMode
+drawIndexed on MTL4|drawIndexedPrimitives|drawPrimitives:
+queue residency|addResidencySet|MTLResidencySet
+drawable on queue|waitForDrawable|signalDrawable
+device factories|newMTL4CommandQueue|newCommandAllocator|newCommandBuffer|newArgumentTableWithDescriptor|newCompilerWithDescriptor|newResidencySetWithDescriptor|newSharedEvent
+render encoder creation|renderCommandEncoderWithDescriptor
+argument table on encoder|setArgumentTable
+dispatch|dispatchThreadgroups|dispatchThreads:
+queue commit|commit:.*count:|signalEvent:|waitForEvent:
+argument table descriptor|maxBufferBindCount|maxTextureBindCount|maxSamplerStateBindCount|supportAttributeStrides|initializeBindings
+render pass descriptor width|renderTargetWidth|renderTargetHeight
+suspend resume|MTL4RenderEncoderOption
+PATTERNS
+}
+
 for source in mr_metal4.mm mr_metal4_milestone.mm; do
     if ! xcrun --sdk iphoneos clang++ "${FLAGS[@]}" -c "$SRC_DIR/$source" \
             -o "$OBJ_DIR/${source%.mm}.o" 2>"$OBJ_DIR/${source%.mm}.log"; then
@@ -71,6 +103,7 @@ for source in mr_metal4.mm mr_metal4_milestone.mm; do
 done
 
 if [[ "$status" != 0 ]]; then
+    dump_surface >&2
     exit 1
 fi
 
