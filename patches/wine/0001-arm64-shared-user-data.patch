@@ -34,7 +34,30 @@ diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
          ptr = MAP_FAILED;
      }
  #else
-@@ -3700,6 +3724,31 @@
+@@ -2032,7 +2056,21 @@
+         else if (use_kernel_writewatch && view->protect & VPROT_WRITEWATCH) vprot &= ~VPROT_WRITEWATCH;
+         set_page_vprot( base, size, vprot );
+     }
+-    return !mprotect_range( base, size, 0, 0 );
++    if (!mprotect_range( base, size, 0, 0 )) return TRUE;
++
++    /* Which errno this is decides what the fix is, and two guesses have already been
++     * wrong. map_image_into_view() reported that it could not set 60000020
++     * (PAGE_EXECUTE_READ) on the load test's .text section, and tests/wine/exec_probe.c
++     * measured that a plain process on this machine can put PROT_EXEC on an anonymous
++     * page and on a mapping of that same .exe and then run code written into it -- so
++     * "this platform does not allow it" is ruled out, and the answer is in the errno
++     * rather than in the permission. */
++    {
++        int saved = errno;
++        ERR( "arm64 set_vprot: mprotect to %#x failed for %p-%p, errno %d (%s)\n",
++             get_unix_prot( vprot ), base, (char *)base + size, saved, strerror( saved ) );
++    }
++    return FALSE;
+ }
+ 
+ 
+@@ -3700,6 +3738,31 @@
          for (i = 0; (*preload_info)[i].size; i++)
              mmap_add_reserved_area( (*preload_info)[i].addr, (*preload_info)[i].size );
  
