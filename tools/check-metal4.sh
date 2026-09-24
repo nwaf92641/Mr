@@ -129,6 +129,17 @@ else
     echo "check-metal4: research/dxmt absent, skipping the route patch check"
 fi
 
+# Every WMTRenderCommandType against the bridge's switch. "Is D3D11 done" has to
+# be a count, not a reading: the Metal 3 walk reports its gaps at run time, which
+# only helps once something runs.
+if [[ -f "$ROOT/research/dxmt/src/winemetal/winemetal.h" ]]; then
+    if ! python3 "$ROOT/tools/check-metal4-enum.py" --root "$ROOT"; then
+        status=1
+    fi
+else
+    echo "check-metal4: research/dxmt absent, skipping the enum check"
+fi
+
 # The winemetal MTL4 bridge translates DXMT's serialised command lists, so it
 # includes DXMT's headers. It is only compiled when the submodule is present --
 # a clean clone has an empty submodule and this must not be the reason it fails.

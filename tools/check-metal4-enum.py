@@ -12,11 +12,25 @@ list is empty and report in the meantime.
 import re
 import sys
 
-ROOT = sys.argv[1] if len(sys.argv) > 1 else '.'
-strict = '--strict' in sys.argv
+ROOT = '.'
+strict = False
+for index, arg in enumerate(sys.argv):
+    if arg == '--root' and index + 1 < len(sys.argv):
+        ROOT = sys.argv[index + 1]
+    if arg == '--strict':
+        strict = True
+# Explicit paths, because the DXMT submodule only exists in CI: a local run can
+# point the header at a checkout elsewhere and still check this tree's bridge.
+header_path = ROOT + '/research/dxmt/src/winemetal/winemetal.h'
+bridge_path = ROOT + '/graphics/metal4/mr_metal4_winemetal.mm'
+for index, arg in enumerate(sys.argv):
+    if arg == '--header' and index + 1 < len(sys.argv):
+        header_path = sys.argv[index + 1]
+    if arg == '--bridge' and index + 1 < len(sys.argv):
+        bridge_path = sys.argv[index + 1]
 
-header = open(ROOT + '/research/dxmt/src/winemetal/winemetal.h').read()
-bridge = open(ROOT + '/graphics/metal4/mr_metal4_winemetal.mm').read()
+header = open(header_path).read()
+bridge = open(bridge_path).read()
 
 block = re.search(r'enum WMTRenderCommandType\s*:\s*\w+\s*\{(.*?)\}', header, re.S)
 if block is None:
