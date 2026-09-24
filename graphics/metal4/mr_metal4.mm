@@ -548,6 +548,39 @@ bool mr_mtl4_frame_encoder_is_open(const mr_mtl4_frame *frame) {
   return frame != nullptr && frame->encoder_open;
 }
 
+MR_MTL4_AVAIL static bool frame_begin_compute_encoder_impl(mr_mtl4_frame *frame) {
+  if (frame->compute != nil) {
+    mr_mtl4_fail("mr_mtl4_frame_begin_compute_encoder: an encoder is already open");
+    return false;
+  }
+  frame->compute = [frame->buffer computeCommandEncoder];
+  if (frame->compute == nil) {
+    mr_mtl4_fail("[MTL4CommandBuffer computeCommandEncoder] returned nil");
+    return false;
+  }
+  frame->encoder_open = true;
+  return true;
+}
+
+bool mr_mtl4_frame_begin_compute_encoder(mr_mtl4_frame *frame) {
+  if (frame == nullptr) {
+    mr_mtl4_fail("mr_mtl4_frame_begin_compute_encoder: null frame");
+    return false;
+  }
+  if (@available(iOS 26.0, macOS 26.0, *)) {
+    return frame_begin_compute_encoder_impl(frame);
+  }
+  mr_mtl4_fail("Metal 4 requires iOS 26 or macOS 26");
+  return false;
+}
+
+void *mr_mtl4_frame_metal_compute_encoder(mr_mtl4_frame *frame) {
+  if (frame == nullptr || frame->compute == nil) {
+    return nullptr;
+  }
+  return (__bridge void *)frame->compute;
+}
+
 void *mr_mtl4_frame_metal_encoder(mr_mtl4_frame *frame) {
   if (frame == nullptr || frame->render == nil) {
     return nullptr;

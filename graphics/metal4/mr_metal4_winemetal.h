@@ -43,6 +43,17 @@ uint32_t mr_mtl4_wmt_encode_render(void *mtl4_render_encoder, mr_mtl4_table *ver
                                    mr_mtl4_table *mesh_table, void *mtl4_transient,
                                    mr_mtl4_residency *residency, const void *cmd_head);
 
+/* The nine blit commands, encoded on an MTL4ComputeCommandEncoder: Metal 4 has
+ * no blit encoder, so these are the Metal 3 copy forms re-expressed, not
+ * renamed. Returns how many commands reached Metal. */
+uint32_t mr_mtl4_wmt_encode_blit(void *mtl4_compute_encoder, mr_mtl4_residency *residency,
+                                 const void *cmd_head);
+
+/* The twelve compute commands on the same encoder family. */
+uint32_t mr_mtl4_wmt_encode_compute(void *mtl4_compute_encoder, mr_mtl4_table *table,
+                                    void *mtl4_transient, mr_mtl4_residency *residency,
+                                    const void *cmd_head);
+
 /* The type ids the walker translated on the last call, in the order it first
  * met them, so a test can assert what a frame actually contained rather than
  * trusting the absence of warnings. 64 entries is DXMT's own limit. */

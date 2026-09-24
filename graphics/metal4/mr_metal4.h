@@ -249,6 +249,14 @@ bool mr_mtl4_frame_wait(mr_mtl4_frame *frame, uint64_t timeout_ms);
  * render pass is open. */
 void *mr_mtl4_frame_metal_encoder(mr_mtl4_frame *frame);
 
+/* Opens a compute encoder on the frame's command buffer. Metal 4 has no blit
+ * encoder -- MTL4CommandEncoder has three concrete forms, Compute, Render and
+ * MachineLearning (MTL4CommandBuffer.h:23, MTL4ComputeCommandEncoder.h:31,
+ * MTL4RenderCommandEncoder.h:58) -- so copies and fills are encoded here too,
+ * through this same entry point. */
+bool mr_mtl4_frame_begin_compute_encoder(mr_mtl4_frame *frame);
+void *mr_mtl4_frame_metal_compute_encoder(mr_mtl4_frame *frame);
+
 /* Presents through the queue rather than the command buffer, which is the
  * shape Metal 4 requires: the GPU waits for the drawable, the batch is
  * committed, the queue signals the drawable, the drawable presents. */

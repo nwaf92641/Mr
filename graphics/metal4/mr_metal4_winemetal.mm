@@ -1064,3 +1064,259 @@ bool mr_mtl4_wmt_session_present(uint64_t command_buffer, uint64_t drawable_hand
 }
 
 uint32_t mr_mtl4_wmt_session_open_frames(void) { return session().live_frames; }
+
+/* ------------------------------------------------------- blit and compute -- */
+
+/* Metal 4 has no blit encoder. Its concrete encoder forms are Compute, Render
+ * and MachineLearning, so the nine blit commands are encoded on
+ * MTL4ComputeCommandEncoder -- the same one the twelve compute commands use.
+ * That is a port, not a rename: nothing here is a blit selector.
+ *
+ * The copy forms are the Metal 3 argument lists, because every form read out of
+ * MTL4ComputeCommandEncoder.h matches its Metal 3 counterpart verbatim:
+ *
+ *   copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:
+ *           toTexture:destinationSlice:destinationLevel:destinationOrigin:
+ *   fillBuffer:range:value:
+ *   generateMipmapsForTexture:
+ *
+ * and the two that were not read (buffer to buffer, buffer to texture) are
+ * written to the same shape their Metal 3 versions have, which the compile
+ * verifies: a wrong argument list is an error there, not a silent difference. */
+namespace {
+
+bool blit_one(mr_mtl4_residency *residency, __unsafe_unretained id encoder,
+              const struct wmtcmd_base *command) {
+  switch ((enum WMTBlitCommandType)command->type) {
+    case WMTBlitCommandNop:
+      return true;
+    case WMTBlitCommandCopyFromBufferToBuffer: {
+      const auto *cmd = (const struct wmtcmd_blit_copy_from_buffer_to_buffer *)command;
+      id<MTLBuffer> src = MR_WMT_OBJ(cmd->src);
+      id<MTLBuffer> dst = MR_WMT_OBJ(cmd->dst);
+      if (src == nil || dst == nil) {
+        break;
+      }
+      mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->src));
+      mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->dst));
+      [(id<MTL4ComputeCommandEncoder>)encoder copyFromBuffer:src
+                                                sourceOffset:(NSUInteger)cmd->src_offset
+                                                    toBuffer:dst
+                                           destinationOffset:(NSUInteger)cmd->dst_offset
+                                                        size:(NSUInteger)cmd->copy_length];
+      return true;
+    }
+    case WMTBlitCommandCopyFromBufferToTexture: {
+      const auto *cmd = (const struct wmtcmd_blit_copy_from_buffer_to_texture *)command;
+      id<MTLBuffer> src = MR_WMT_OBJ(cmd->src);
+      id<MTLTexture> dst = MR_WMT_OBJ(cmd->dst);
+      if (src == nil || dst == nil) {
+        break;
+      }
+      mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->src));
+      mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->dst));
+      [(id<MTL4ComputeCommandEncoder>)encoder
+            copyFromBuffer:src
+              sourceOffset:(NSUInteger)cmd->src_offset
+         sourceBytesPerRow:(NSUInteger)cmd->bytes_per_row
+       sourceBytesPerImage:(NSUInteger)cmd->bytes_per_image
+                sourceSize:MTLSizeMake(cmd->size.width, cmd->size.height, cmd->size.depth)
+                 toTexture:dst
+          destinationSlice:(NSUInteger)cmd->slice
+          destinationLevel:(NSUInteger)cmd->level
+         destinationOrigin:MTLOriginMake(0, 0, 0)];
+      return true;
+    }
+    case WMTBlitCommandCopyFromTextureToBuffer: {
+      const auto *cmd = (const struct wmtcmd_blit_copy_from_texture_to_buffer *)command;
+      id<MTLTexture> src = MR_WMT_OBJ(cmd->src);
+      id<MTLBuffer> dst = MR_WMT_OBJ(cmd->dst);
+      if (src == nil || dst == nil) {
+        break;
+      }
+      mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->src));
+      mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->dst));
+      [(id<MTL4ComputeCommandEncoder>)encoder
+              copyFromTexture:src
+                  sourceSlice:(NSUInteger)cmd->slice
+                  sourceLevel:(NSUInteger)cmd->level
+                 sourceOrigin:MTLOriginMake((NSUInteger)cmd->origin.x,
+                                            (NSUInteger)cmd->origin.y,
+                                            (NSUInteger)cmd->origin.z)
+                   sourceSize:MTLSizeMake(cmd->size.width, cmd->size.height, cmd->size.depth)
+                     toBuffer:dst
+            destinationOffset:(NSUInteger)cmd->offset
+       destinationBytesPerRow:(NSUInteger)cmd->bytes_per_row
+     destinationBytesPerImage:(NSUInteger)cmd->bytes_per_image];
+      return true;
+    }
+    case WMTBlitCommandCopyFromTextureToTexture: {
+      const auto *cmd = (const struct wmtcmd_blit_copy_from_texture_to_texture *)command;
+      id<MTLTexture> src = MR_WMT_OBJ(cmd->src);
+      id<MTLTexture> dst = MR_WMT_OBJ(cmd->dst);
+      if (src == nil || dst == nil) {
+        break;
+      }
+      mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->src));
+      mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->dst));
+      [(id<MTL4ComputeCommandEncoder>)encoder
+          copyFromTexture:src
+              sourceSlice:(NSUInteger)cmd->src_slice
+              sourceLevel:(NSUInteger)cmd->src_level
+             sourceOrigin:MTLOriginMake((NSUInteger)cmd->src_origin.x,
+                                        (NSUInteger)cmd->src_origin.y,
+                                        (NSUInteger)cmd->src_origin.z)
+               sourceSize:MTLSizeMake(cmd->src_size.width, cmd->src_size.height, cmd->src_size.depth)
+                toTexture:dst
+         destinationSlice:(NSUInteger)cmd->dst_slice
+         destinationLevel:(NSUInteger)cmd->dst_level
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
+      return true;
+    }
+    case WMTBlitCommandGenerateMipmaps: {
+      const auto *cmd = (const struct wmtcmd_blit_generate_mipmaps *)command;
+      id<MTLTexture> texture = MR_WMT_OBJ(cmd->texture);
+      if (texture == nil) {
+        break;
+      }
+      mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->texture));
+      [(id<MTL4ComputeCommandEncoder>)encoder generateMipmapsForTexture:texture];
+      return true;
+    }
+    case WMTBlitCommandWaitForFence: {
+      const auto *cmd = (const struct wmtcmd_blit_fence_op *)command;
+      id<MTLFence> fence = MR_WMT_OBJ(cmd->fence);
+      if (fence == nil) {
+        break;
+      }
+      [(id<MTL4ComputeCommandEncoder>)encoder waitForFence:fence];
+      return true;
+    }
+    case WMTBlitCommandUpdateFence: {
+      const auto *cmd = (const struct wmtcmd_blit_fence_op *)command;
+      id<MTLFence> fence = MR_WMT_OBJ(cmd->fence);
+      if (fence == nil) {
+        break;
+      }
+      [(id<MTL4ComputeCommandEncoder>)encoder updateFence:fence];
+      return true;
+    }
+    case WMTBlitCommandFillBuffer: {
+      const auto *cmd = (const struct wmtcmd_blit_fillbuffer *)command;
+      id<MTLBuffer> buffer = MR_WMT_OBJ(cmd->buffer);
+      if (buffer == nil) {
+        break;
+      }
+      mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->buffer));
+      [(id<MTL4ComputeCommandEncoder>)encoder fillBuffer:buffer
+                                                   range:NSMakeRange((NSUInteger)cmd->offset,
+                                                                     (NSUInteger)cmd->length)
+                                                   value:cmd->value];
+      return true;
+    }
+  }
+  return false;
+}
+
+} /* namespace */
+
+uint32_t mr_mtl4_wmt_encode_blit(void *mtl4_compute_encoder, mr_mtl4_residency *residency,
+                                 const void *cmd_head) {
+  if (mtl4_compute_encoder == nullptr || cmd_head == nullptr) {
+    return 0;
+  }
+  __unsafe_unretained id encoder = (__bridge id)mtl4_compute_encoder;
+  uint32_t translated = 0;
+  for (const struct wmtcmd_base *command = (const struct wmtcmd_base *)cmd_head; command != nullptr;
+       command = (const struct wmtcmd_base *)command->next.ptr) {
+    if (blit_one(residency, encoder, command)) {
+      translated += 1;
+    } else {
+      static uint32_t reported[64];
+      static uint32_t reported_count;
+      uint32_t index = 0;
+      for (; index < reported_count; ++index) {
+        if (reported[index] == command->type) {
+          break;
+        }
+      }
+      if (index == reported_count && reported_count < 64) {
+        reported[reported_count++] = command->type;
+        fprintf(stderr, "[mr-mtl4] blit command type %u is not translated\n", command->type);
+      }
+    }
+  }
+  if (mr_mtl4_residency_dirty(residency)) {
+    mr_mtl4_residency_commit(residency);
+  }
+  return translated;
+}
+
+uint32_t mr_mtl4_wmt_encode_compute(void *mtl4_compute_encoder, mr_mtl4_table *table,
+                                    void *mtl4_transient, mr_mtl4_residency *residency,
+                                    const void *cmd_head) {
+  if (mtl4_compute_encoder == nullptr || cmd_head == nullptr) {
+    return 0;
+  }
+  __unsafe_unretained id encoder = (__bridge id)mtl4_compute_encoder;
+  uint32_t translated = 0;
+  for (const struct wmtcmd_base *command = (const struct wmtcmd_base *)cmd_head; command != nullptr;
+       command = (const struct wmtcmd_base *)command->next.ptr) {
+    bool ok = false;
+    switch ((enum WMTComputeCommandType)command->type) {
+      case WMTComputeCommandNop:
+        ok = true;
+        break;
+      case WMTComputeCommandDispatch: {
+        const auto *cmd = (const struct wmtcmd_compute_dispatch *)command;
+        [(id<MTL4ComputeCommandEncoder>)encoder
+            dispatchThreadgroups:MTLSizeMake(cmd->size.width, cmd->size.height, cmd->size.depth)
+            threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        ok = true;
+        break;
+      }
+      case WMTComputeCommandDispatchThreads: {
+        const auto *cmd = (const struct wmtcmd_compute_dispatch *)command;
+        [(id<MTL4ComputeCommandEncoder>)encoder
+            dispatchThreads:MTLSizeMake(cmd->size.width, cmd->size.height, cmd->size.depth)
+            threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+        ok = true;
+        break;
+      }
+      case WMTComputeCommandDispatchIndirect: {
+        const auto *cmd = (const struct wmtcmd_compute_dispatch_indirect *)command;
+        id<MTLBuffer> arguments = MR_WMT_OBJ(cmd->indirect_args_buffer);
+        if (arguments != nil) {
+          mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->indirect_args_buffer));
+          [(id<MTL4ComputeCommandEncoder>)encoder
+              dispatchThreadgroupsWithIndirectBuffer:(MTLGPUAddress)((uint64_t)[arguments gpuAddress] +
+                                                                     cmd->indirect_args_offset)
+                             threadsPerThreadgroup:MTLSizeMake(1, 1, 1)];
+          ok = true;
+        }
+        break;
+      }
+      case WMTComputeCommandSetPSO: {
+        const auto *cmd = (const struct wmtcmd_compute_setpso *)command;
+        id<MTLComputePipelineState> state = MR_WMT_OBJ(cmd->pso);
+        if (state != nil) {
+          [(id<MTL4ComputeCommandEncoder>)encoder setComputePipelineState:state];
+          ok = true;
+        }
+        break;
+      }
+      default:
+        fprintf(stderr, "[mr-mtl4] compute command type %u is not translated yet\n", command->type);
+        break;
+    }
+    if (ok) {
+      translated += 1;
+    }
+  }
+  if (mr_mtl4_residency_dirty(residency)) {
+    mr_mtl4_residency_commit(residency);
+  }
+  (void)table;
+  (void)mtl4_transient;
+  return translated;
+}
