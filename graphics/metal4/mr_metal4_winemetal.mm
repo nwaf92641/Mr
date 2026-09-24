@@ -161,17 +161,6 @@ bool encode_one(State &state, const struct wmtcmd_base *command) {
     }
     case WMTRenderCommandNop:
       return true;
-    case WMTRenderCommandUseResource: {
-      const auto *cmd = (const struct wmtcmd_render_useresource *)command;
-      /* Metal 4 tracks residency through sets attached to the queue, but
-       * useResource: is still how a resource's usage scope is declared, and the
-       * guest already decided the scope -- so it is passed through rather than
-       * replaced by a policy of our own. */
-      [state.encoder useResource:(id<MTLResource>)MR_WMT_OBJ(cmd->resource)
-                           usage:(MTLResourceUsage)cmd->usage
-                          stages:(MTLRenderStages)cmd->stages];
-      return true;
-    }
     case WMTRenderCommandSetViewport: {
       const auto *cmd = (const struct wmtcmd_render_setviewport *)command;
       MTLViewport viewport = {cmd->viewport.originX, cmd->viewport.originY, cmd->viewport.width,
@@ -613,8 +602,6 @@ bool mr_mtl4_wmt_session_present(uint64_t command_buffer, uint64_t drawable_hand
   if (state.failed || frame == nullptr) {
     return false;
   }
-  const uint64_t slot = (uint64_t)(frame - state.frames[0]);
-  (void)slot;
   /* Presentation has to happen on the frame that is still open; a frame already
    * committed is waited on and released, which is the other half of the order
    * Metal 4 fixes. */
