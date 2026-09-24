@@ -93,6 +93,7 @@ render pass descriptor width|renderTargetWidth|renderTargetHeight
 barrier and fence|barrierAfterQueueStages|barrierAfterStages
 encoder fence|updateFence|waitForFence|afterEncoderStages|beforeEncoderStages
 mesh dispatch|MeshThreadgroups|indirectMeshBuffer
+MTL4 encoder families|@protocol MTL4[A-Za-z]*CommandEncoder|blitCommandEncoder
 suspend resume|MTL4RenderEncoderOption
 PATTERNS
 }
