@@ -1189,7 +1189,8 @@ bool blit_one(mr_mtl4_residency *residency, __unsafe_unretained id encoder,
       if (fence == nil) {
         break;
       }
-      [(id<MTL4ComputeCommandEncoder>)encoder waitForFence:fence];
+      [(id<MTL4ComputeCommandEncoder>)encoder waitForFence:fence
+                                          beforeEncoderStages:(MTLStages)MTLStageBlit];
       return true;
     }
     case WMTBlitCommandUpdateFence: {
@@ -1198,7 +1199,8 @@ bool blit_one(mr_mtl4_residency *residency, __unsafe_unretained id encoder,
       if (fence == nil) {
         break;
       }
-      [(id<MTL4ComputeCommandEncoder>)encoder updateFence:fence];
+      [(id<MTL4ComputeCommandEncoder>)encoder updateFence:fence
+                                          afterEncoderStages:(MTLStages)MTLStageBlit];
       return true;
     }
     case WMTBlitCommandFillBuffer: {
