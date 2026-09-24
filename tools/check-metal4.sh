@@ -187,3 +187,13 @@ fi
 echo "check-metal4: OK -- Metal 4 layer compiles and archives against iPhoneOS $SDK_VERSION"
 echo "check-metal4:        $OBJ_DIR/libmr_metal4.a ($(du -h "$OBJ_DIR/libmr_metal4.a" | cut -f1))"
 echo "check-metal4:        compile check only; running it needs a device with MTLGPUFamilyMetal4"
+
+# Verbatim ranges: the pattern dump prints two lines of context, which cannot
+# show a selector spanning more than that. The copy, fill and mipmap
+# signatures are read from the file rather than reconstructed from fragments.
+sdk_path="$(xcrun --sdk iphoneos --show-sdk-path)"
+compute_header="$sdk_path/System/Library/Frameworks/Metal.framework/Headers/MTL4ComputeCommandEncoder.h"
+echo "check-metal4: --- compute copy selectors, verbatim"
+sed -n "140,180p" "$compute_header" 2>/dev/null || true
+echo "check-metal4: --- compute fill mipmap bytes"
+sed -n "460,540p" "$compute_header" 2>/dev/null || true
