@@ -18,10 +18,12 @@
  * Run unsigned, and run again after ad-hoc signing with --entitlements. The two
  * runs together say whether the answer is an entitlement, or something else. */
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static void report( const char *what, void *at, int err )
@@ -40,7 +42,48 @@ static void report_call( const char *what, long result )
         printf( "EXEC OK   %-30s returned %ld\n", what, result );
 }
 
-int main( void )
+/* The case a PE loader performs: a file mapped writable while the section is
+ * copied in, then made executable. Wine's set_vprot() is this second step, and
+ * map_image_into_view() reported that it failed on the .text section of the load
+ * test. The path is the file Wine maps, so the probe is asking about that file. */
+static void probe_file( const char *path )
+{
+    struct stat st;
+    int fd = open( path, O_RDONLY );
+    void *p;
+
+    if (fd == -1)
+    {
+        printf( "EXEC SKIP %-30s cannot open %s\n", "file mapped, then rx", path );
+        return;
+    }
+    if (fstat( fd, &st ) == -1 || st.st_size == 0)
+    {
+        printf( "EXEC SKIP %-30s cannot stat %s\n", "file mapped, then rx", path );
+        close( fd );
+        return;
+    }
+
+    errno = 0;
+    p = mmap( NULL, (size_t)st.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0 );
+    if (p == MAP_FAILED)
+    {
+        report( "file mapped, then rx", p, errno );
+        close( fd );
+        return;
+    }
+
+    errno = 0;
+    if (mprotect( p, (size_t)st.st_size, PROT_READ | PROT_EXEC ) == -1)
+        report( "file mapped, then rx", MAP_FAILED, errno );
+    else
+        report( "file mapped, then rx", p, 0 );
+
+    munmap( p, (size_t)st.st_size );
+    close( fd );
+}
+
+int main( int argc, char **argv )
 {
     size_t page = (size_t)getpagesize();
     void *p;
@@ -120,6 +163,10 @@ int main( void )
 #else
     printf( "EXEC SKIP %-30s not arm64\n", "write, mprotect, call" );
 #endif
+
+    /* The file the workflow passes is the load test, which is the exact file Wine
+     * maps and could not make executable. Without an argument, this binary. */
+    probe_file( argc > 1 ? argv[1] : argv[0] );
 
     return 0;
 }

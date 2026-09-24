@@ -574,13 +574,13 @@ jobs:
           echo "=== what this machine lets a running process execute ===" | tee -a "$out"
           if /usr/bin/clang "$GITHUB_WORKSPACE/tests/wine/exec_probe.c" -o "$RUNNER_TEMP/exec_probe" >> "$out" 2>&1; then
             echo "--- unsigned" | tee -a "$out"
-            "$RUNNER_TEMP/exec_probe" >> "$out" 2>&1
+            "$RUNNER_TEMP/exec_probe" "$RUNNER_TEMP/load_d3d11.exe" >> "$out" 2>&1
             printf 'probe exit status: %d\n' "$?" | tee -a "$out"
             cp "$RUNNER_TEMP/exec_probe" "$RUNNER_TEMP/exec_probe_signed"
             if codesign --force --sign - --entitlements "$GITHUB_WORKSPACE/tests/wine/entitlements.plist" "$RUNNER_TEMP/exec_probe_signed" >> "$out" 2>&1; then
               echo "--- ad-hoc signed with the executable memory entitlements" | tee -a "$out"
               codesign -d --entitlements - "$RUNNER_TEMP/exec_probe_signed" >> "$out" 2>&1
-              "$RUNNER_TEMP/exec_probe_signed" >> "$out" 2>&1
+              "$RUNNER_TEMP/exec_probe_signed" "$RUNNER_TEMP/load_d3d11.exe" >> "$out" 2>&1
               printf 'probe exit status: %d\n' "$?" | tee -a "$out"
             else
               echo "the probe could not be signed, see above" | tee -a "$out"
