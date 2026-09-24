@@ -19,6 +19,11 @@
  * pointer on one side. */
 #define MR_WMT_OBJ(handle) (__bridge id)(void *)(uintptr_t)(handle)
 
+/* For the layer's void* object parameters. The handle is already the object's
+ * address, so this is an integer-to-pointer cast and needs no ARC bridge -- and
+ * taking one would ask the compiler for ownership this code does not want. */
+#define MR_WMT_RAW(handle) ((void *)(uintptr_t)(handle))
+
 namespace {
 
 /* D3D11 allows 16 vertex and 16 pixel constant/vertex buffers per stage in the
@@ -120,7 +125,7 @@ bool encode_one(State &state, mr_mtl4_table *table, const struct wmtcmd_base *co
     }
     case WMTRenderCommandSetFragmentTexture: {
       const auto *cmd = (const struct wmtcmd_render_settexture *)command;
-      mr_mtl4_table_set_texture(table, (void *)MR_WMT_OBJ(cmd->texture), cmd->index);
+      mr_mtl4_table_set_texture(table, MR_WMT_RAW(cmd->texture), cmd->index);
       return true;
     }
     case WMTRenderCommandSetFragmentBytes: {
