@@ -1,47 +1,40 @@
 diff --git a/dlls/ntdll/unix/virtual.c b/dlls/ntdll/unix/virtual.c
 --- a/dlls/ntdll/unix/virtual.c
 +++ b/dlls/ntdll/unix/virtual.c
-@@ -615,7 +615,38 @@
+@@ -615,7 +615,31 @@
      }
      else
      {
 -        errno = (ret == KERN_NO_SPACE ? EEXIST : ENOMEM);
-+        /* mach_vm_map with VM_FLAGS_FIXED does not distinguish a range that is taken
-+         * from other failures here, and the difference is what the caller does with
-+         * it. try_map_free_area() walks the free areas of Wine's own bookkeeping and
-+         * stops at the first mapping failure that is not EEXIST:
++        /* Which failures mean "not this address" is measured, not assumed. Two runs
++         * printed the values for the two cases that matter on this platform:
++         *   mach ret 3 (KERN_NO_SPACE) at 0x1012d0000-0x1013e0000, a range occupied
++         *                              by the loader's own mappings
++         *   mach ret 1 (KERN_INVALID_ADDRESS) at 0x100000000-0x100030000, where the
++         *                              next mapped region is at 0x100450000, so the
++         *                              address is not available for a fixed mapping
++         *                              even though nothing is mapped in it
++         * Wine turned the first into ENOMEM through the ternary this replaces and the
++         * second into ENOMEM unconditionally, and try_map_free_area() stops at any
++         * failure that is not EEXIST instead of stepping on. A process with hundreds
++         * of free areas above the loader therefore reported as out of memory:
 +         *   err:virtual:try_map_free_area mmap() error Cannot allocate memory,
 +         *   range 0x100000000-0x100030000, unix_prot 0.
-+         * The range it stopped at is where this loader's own image is, which Wine has
-+         * no record of, and the kernel answers a fixed mapping over it with
-+         * KERN_PROTECTION_FAILURE rather than KERN_NO_SPACE -- so Wine reports ENOMEM
-+         * and gives up, where EEXIST would have moved it on to the next free area.
-+         * Whether the range is mapped is asked with mach_vm_region, the same question
-+         * reserve_area() asks a few hundred lines above. The values are printed
-+         * because the first version of this change was measured to make no difference,
-+         * and a line saying which answer came back is worth more than another guess. */
++         * The three address-related refusals all mean "this address is not usable",
++         * which is what EEXIST already means to that loop. Anything else stays ENOMEM
++         * and prints, because that is the case this change has not measured. */
++        if (ret == KERN_NO_SPACE || ret == KERN_INVALID_ADDRESS || ret == KERN_PROTECTION_FAILURE)
++            errno = EEXIST;
++        else
 +        {
-+            mach_vm_address_t query = (mach_vm_address_t)start;
-+            mach_vm_address_t target = (mach_vm_address_t)start + size;
-+            mach_vm_size_t region_size = 0;
-+            vm_region_basic_info_data_64_t info;
-+            mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-+            mach_port_t object = MACH_PORT_NULL;
-+            kern_return_t probe = mach_vm_region( mach_task_self(), &query, &region_size,
-+                                                  VM_REGION_BASIC_INFO_64,
-+                                                  (vm_region_info_t)&info, &count, &object );
-+
-+            if (probe == KERN_SUCCESS && query < target)
-+                errno = EEXIST;
-+            else
-+                errno = (ret == KERN_NO_SPACE ? EEXIST : ENOMEM);
-+            ERR( "arm64 fixed map: mach ret %d, probe %d at %p, range %p-%p, errno %d\n",
-+                 ret, probe, (void *)query, start, (char *)start + size, errno );
++            errno = ENOMEM;
++            ERR( "arm64 fixed map gave up: mach ret %d, range %p-%p\n",
++                 ret, start, (char *)start + size );
 +        }
          ptr = MAP_FAILED;
      }
  #else
-@@ -3700,6 +3731,31 @@
+@@ -3700,6 +3724,31 @@
          for (i = 0; (*preload_info)[i].size; i++)
              mmap_add_reserved_area( (*preload_info)[i].addr, (*preload_info)[i].size );
  
