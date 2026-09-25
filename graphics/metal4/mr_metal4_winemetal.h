@@ -94,6 +94,13 @@ bool mr_mtl4_wmt_session_render_encoder(uint64_t command_buffer, const void *ren
  * many commands reached Metal, so a frame can be judged rather than assumed. */
 bool mr_mtl4_wmt_session_encode(uint64_t encoder, const void *cmd_head, uint32_t *out_translated);
 
+/* Blit and compute encoders, and their command lists. Both are
+ * MTL4ComputeCommandEncoder underneath: Metal 4 has no blit encoder. */
+uint64_t mr_mtl4_wmt_session_blit_encoder(uint64_t command_buffer);
+uint64_t mr_mtl4_wmt_session_compute_encoder(uint64_t command_buffer);
+bool mr_mtl4_wmt_session_blit_encode(uint64_t encoder, const void *cmd_head);
+bool mr_mtl4_wmt_session_compute_encode(uint64_t encoder, const void *cmd_head);
+
 bool mr_mtl4_wmt_session_end_encoding(uint64_t handle);
 bool mr_mtl4_wmt_session_commit(uint64_t command_buffer);
 bool mr_mtl4_wmt_session_wait(uint64_t command_buffer);

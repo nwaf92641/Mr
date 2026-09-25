@@ -55,6 +55,7 @@ struct Stages {
   Stage fragment;
   Stage object;
   Stage mesh;
+  Stage compute;
 };
 
 Stages &wmt_stages() {
@@ -783,6 +784,11 @@ namespace {
 constexpr uint64_t kTokenTag = 0x4D52000000000000ULL; /* 'MR' */
 constexpr uint32_t kKindFrame = 1;
 constexpr uint32_t kKindEncoder = 2;
+/* Blit and compute share MTL4ComputeCommandEncoder, but they arrive as separate
+ * encoder slots in winemetal, so each gets its own token kind and the dispatch
+ * in session_encode knows which walker to run. */
+constexpr uint32_t kKindBlit = 3;
+constexpr uint32_t kKindCompute = 4;
 constexpr uint32_t kMaxFrames = 8;
 constexpr uint32_t kMaxEncoders = 8;
 
@@ -805,6 +811,7 @@ struct Session {
   mr_mtl4_residency *residency;
   mr_mtl4_frame *frames[kMaxFrames];
   __unsafe_unretained id encoder_object[kMaxEncoders];
+  uint32_t encoder_kind[kMaxEncoders];
   bool encoder_live[kMaxEncoders];
   uint32_t next_frame;
   uint32_t live_frames;
@@ -967,11 +974,75 @@ bool mr_mtl4_wmt_session_render_encoder(uint64_t command_buffer, const void *ren
     }
     state.encoder_live[index] = true;
     state.encoder_object[index] = (__bridge id)mr_mtl4_frame_metal_encoder(frame);
+    state.encoder_kind[index] = kKindEncoder;
     *out_encoder = make_token(kKindEncoder, index);
     return true;
   }
   fprintf(stderr, "[mr-mtl4] no free encoder slot\n");
   return false;
+}
+
+/* A blit or compute encoder on the frame's command buffer. Both use the same
+ * MTL4ComputeCommandEncoder, because Metal 4 has no blit encoder. */
+static bool begin_aux_encoder(uint64_t command_buffer, uint32_t kind, uint64_t *out_encoder) {
+  Session &state = start_session();
+  mr_mtl4_frame *frame = frame_for(command_buffer);
+  if (state.failed || frame == nullptr || out_encoder == nullptr) {
+    return false;
+  }
+  if (!mr_mtl4_frame_begin_compute_encoder(frame)) {
+    fprintf(stderr, "[mr-mtl4] compute encoder failed: %s\n", mr_mtl4_last_error());
+    return false;
+  }
+  for (uint32_t index = 0; index < kMaxEncoders; ++index) {
+    if (state.encoder_live[index]) {
+      continue;
+    }
+    state.encoder_live[index] = true;
+    state.encoder_object[index] = (__bridge id)mr_mtl4_frame_metal_compute_encoder(frame);
+    state.encoder_kind[index] = kind;
+    *out_encoder = make_token(kind, index);
+    return true;
+  }
+  fprintf(stderr, "[mr-mtl4] no free encoder slot\n");
+  return false;
+}
+
+uint64_t mr_mtl4_wmt_session_blit_encoder(uint64_t command_buffer) {
+  uint64_t token = 0;
+  return begin_aux_encoder(command_buffer, kKindBlit, &token) ? token : 0;
+}
+
+uint64_t mr_mtl4_wmt_session_compute_encoder(uint64_t command_buffer) {
+  uint64_t token = 0;
+  return begin_aux_encoder(command_buffer, kKindCompute, &token) ? token : 0;
+}
+
+bool mr_mtl4_wmt_session_blit_encode(uint64_t encoder, const void *cmd_head) {
+  Session &state = start_session();
+  if (state.failed || !is_token(encoder) || token_kind(encoder) != kKindBlit) {
+    return false;
+  }
+  const uint32_t index = token_index(encoder);
+  if (index >= kMaxEncoders || !state.encoder_live[index]) {
+    return false;
+  }
+  mr_mtl4_wmt_encode_blit((__bridge void *)state.encoder_object[index], state.residency, cmd_head);
+  return true;
+}
+
+bool mr_mtl4_wmt_session_compute_encode(uint64_t encoder, const void *cmd_head) {
+  Session &state = start_session();
+  if (state.failed || !is_token(encoder) || token_kind(encoder) != kKindCompute) {
+    return false;
+  }
+  const uint32_t index = token_index(encoder);
+  if (index >= kMaxEncoders || !state.encoder_live[index]) {
+    return false;
+  }
+  mr_mtl4_wmt_encode_compute((__bridge void *)state.encoder_object[index], state.object_table,
+                             state.transient, state.residency, cmd_head);
+  return true;
 }
 
 bool mr_mtl4_wmt_session_encode(uint64_t encoder, const void *cmd_head, uint32_t *out_translated) {
@@ -995,8 +1066,23 @@ bool mr_mtl4_wmt_session_encode(uint64_t encoder, const void *cmd_head, uint32_t
 
 bool mr_mtl4_wmt_session_end_encoding(uint64_t handle) {
   Session &state = session();
-  if (!state.started || state.failed || !is_token(handle) || token_kind(handle) != kKindEncoder) {
+  if (!state.started || state.failed || !is_token(handle)) {
     return false;
+  }
+  const uint32_t kind = token_kind(handle);
+  if (kind != kKindEncoder && kind != kKindBlit && kind != kKindCompute) {
+    return false;
+  }
+  if (kind != kKindEncoder) {
+    state.encoder_live[token_index(handle)] = false;
+    state.encoder_object[token_index(handle)] = nil;
+    for (uint32_t slot = 0; slot < kMaxFrames; ++slot) {
+      mr_mtl4_frame *frame = state.frames[slot];
+      if (frame != nullptr && mr_mtl4_frame_encoder_is_open(frame)) {
+        mr_mtl4_frame_end_encoder(frame);
+      }
+    }
+    return true;
   }
   const uint32_t index = token_index(handle);
   if (index >= kMaxEncoders || !state.encoder_live[index]) {
@@ -1305,6 +1391,91 @@ uint32_t mr_mtl4_wmt_encode_compute(void *mtl4_compute_encoder, mr_mtl4_table *t
           [(id<MTL4ComputeCommandEncoder>)encoder setComputePipelineState:state];
           ok = true;
         }
+        break;
+      }
+      case WMTComputeCommandSetBuffer: {
+        const auto *cmd = (const struct wmtcmd_compute_setbuffer *)command;
+        if (cmd->buffer == 0) {
+          break;
+        }
+        mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->buffer));
+        wmt_stages().compute.buffers[cmd->index] = MR_WMT_OBJ(cmd->buffer);
+        wmt_stages().compute.offsets[cmd->index] = cmd->offset;
+        rebind(wmt_stages().compute, table, cmd->index);
+        ok = true;
+        break;
+      }
+      case WMTComputeCommandSetBufferOffset: {
+        const auto *cmd = (const struct wmtcmd_compute_setbufferoffset *)command;
+        /* Needs the base from an earlier SetBuffer; without it the address is
+         * unknown and rebinding nothing would leave the slot where it was. */
+        if (!wmt_stages().compute.valid(cmd->index) ||
+            wmt_stages().compute.buffers[cmd->index] == nil) {
+          break;
+        }
+        wmt_stages().compute.offsets[cmd->index] = cmd->offset;
+        rebind(wmt_stages().compute, table, cmd->index);
+        ok = true;
+        break;
+      }
+      case WMTComputeCommandSetBytes: {
+        const auto *cmd = (const struct wmtcmd_compute_setbytes *)command;
+        if (mtl4_transient == nullptr) {
+          break;
+        }
+        /* setBytes: does not exist on MTL4ComputeCommandEncoder either; the
+         * bytes go into the transient buffer and the binding is the address,
+         * exactly as on the render path. */
+        const uint64_t address = mr_mtl4_transient_write((mr_mtl4_transient *)mtl4_transient,
+                                                        cmd->bytes.ptr, cmd->length);
+        if (address == 0) {
+          break;
+        }
+        mr_mtl4_table_set_buffer(table, address, cmd->index);
+        ok = true;
+        break;
+      }
+      case WMTComputeCommandSetTexture: {
+        const auto *cmd = (const struct wmtcmd_compute_settexture *)command;
+        if (cmd->texture == 0) {
+          break;
+        }
+        mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->texture));
+        mr_mtl4_table_set_texture(table, MR_WMT_RAW(cmd->texture), cmd->index);
+        ok = true;
+        break;
+      }
+      case WMTComputeCommandUseResource: {
+        const auto *cmd = (const struct wmtcmd_compute_useresource *)command;
+        if (cmd->resource == 0) {
+          break;
+        }
+        /* As on the render path: Metal 4 governs access through residency, so
+         * the resource joins the set rather than a call being invented. The
+         * usage field has no counterpart, and permissive is the safe side. */
+        ok = mr_mtl4_residency_add(residency, MR_WMT_RAW(cmd->resource));
+        break;
+      }
+      case WMTComputeCommandWaitForFence: {
+        const auto *cmd = (const struct wmtcmd_compute_fence_op *)command;
+        id<MTLFence> fence = MR_WMT_OBJ(cmd->fence);
+        if (fence == nil) {
+          break;
+        }
+        [(id<MTL4ComputeCommandEncoder>)encoder waitForFence:fence
+                                          beforeEncoderStages:(MTLStages)MTLStageDispatch];
+        ok = true;
+        break;
+      }
+      case WMTComputeCommandUpdateFence: {
+        const auto *cmd = (const struct wmtcmd_compute_fence_op *)command;
+        id<MTLFence> fence = MR_WMT_OBJ(cmd->fence);
+        if (fence == nil) {
+          break;
+        }
+        [(id<MTL4ComputeCommandEncoder>)encoder updateFence:fence
+                                          afterEncoderStages:(MTLStages)MTLStageDispatch];
+        ok = true;
         break;
       }
       default:

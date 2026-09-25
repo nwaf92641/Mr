@@ -1,5 +1,5 @@
 diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
-index 54b495c..24d4cfc 100644
+index 54b495c..7e61cb7 100644
 --- a/src/winemetal/unix/winemetal_unix.c
 +++ b/src/winemetal/unix/winemetal_unix.c
 @@ -34,6 +34,13 @@ extern kern_return_t bootstrap_look_up(mach_port_t bp, const char *service_name,
@@ -54,7 +54,21 @@ index 54b495c..24d4cfc 100644
    if (wmtr_enabled()) {
      struct rm_arg_handle a = { params->handle };
      wmtr_call(RM_OP_WAIT_COMPLETED, &a, sizeof a, 0, 0, 0);
-@@ -930,6 +954,13 @@ static NTSTATUS
+@@ -908,6 +932,13 @@ _MTLDevice_newComputePipelineState(void *obj) {
+ static NTSTATUS
+ _MTLCommandBuffer_blitCommandEncoder(void *obj) {
+   struct unixcall_generic_obj_obj_ret *params = obj;
++  if (!wmtr_enabled() && mr_mtl4_wmt_session_available()) {
++    obj_handle_t token = (obj_handle_t)mr_mtl4_wmt_session_blit_encoder(params->handle);
++    if (token) {
++      params->ret = token;
++      return STATUS_SUCCESS;
++    }
++  }
+   if (wmtr_enabled()) {
+     struct rm_arg_handle a = { params->handle };
+     struct rm_ret_handle r;
+@@ -930,6 +961,20 @@ static NTSTATUS
  _MTLCommandBuffer_renderCommandEncoder(void *obj) {
    struct unixcall_generic_obj_uint64_obj_ret *params = obj;
    struct WMTRenderPassInfo *info = (struct WMTRenderPassInfo *)params->arg;
@@ -65,10 +79,17 @@ index 54b495c..24d4cfc 100644
 +      return STATUS_SUCCESS;
 +    }
 +  }
++  if (!wmtr_enabled() && mr_mtl4_wmt_session_available()) {
++    obj_handle_t token = (obj_handle_t)mr_mtl4_wmt_session_compute_encoder(params->handle);
++    if (token) {
++      params->ret = token;
++      return STATUS_SUCCESS;
++    }
++  }
    if (wmtr_enabled()) {
      /* The full pass: eight colour attachments with their own load/store
       * actions, levels, slices and resolve targets, plus depth and stencil.
-@@ -996,6 +1027,9 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
+@@ -996,6 +1041,9 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
  static NTSTATUS
  _MTLCommandEncoder_endEncoding(void *obj) {
    struct unixcall_generic_obj_noret *params = obj;
@@ -78,7 +99,18 @@ index 54b495c..24d4cfc 100644
    if (wmtr_enabled()) {
      struct rm_arg_handle a = { params->handle };
      wmtr_call(RM_OP_END_ENCODING, &a, sizeof a, 0, 0, 0);
-@@ -1609,6 +1643,12 @@ static NTSTATUS
+@@ -1401,6 +1449,10 @@ static NTSTATUS
+ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
+   struct unixcall_generic_obj_cmd_noret *params = obj;
+   const struct wmtcmd_base *next = params->cmd_head.ptr;
++  if (!wmtr_enabled() &&
++      mr_mtl4_wmt_session_blit_encode((uint64_t)params->encoder, params->cmd_head.ptr)) {
++    return STATUS_SUCCESS;
++  }
+   if (wmtr_enabled()) {
+     /* Blit commands carry only handles and scalars, so each struct travels
+      * verbatim as {type, size, bytes}; the guest-pointer `next` is not sent.
+@@ -1609,6 +1661,16 @@ static NTSTATUS
  _MTLRenderCommandEncoder_encodeCommands(void *obj) {
    struct unixcall_generic_obj_cmd_noret *params = obj;
    const struct wmtcmd_base *next = params->cmd_head.ptr;
@@ -88,10 +120,14 @@ index 54b495c..24d4cfc 100644
 +      return STATUS_SUCCESS;
 +    }
 +  }
++  if (!wmtr_enabled() &&
++      mr_mtl4_wmt_session_compute_encode((uint64_t)params->encoder, params->cmd_head.ptr)) {
++    return STATUS_SUCCESS;
++  }
    if (wmtr_enabled()) {
      /* Pack with the SAME packer the wire tests exercise: a second walker here
       * would prove nothing about either. The batch replays into the existing
-@@ -2185,6 +2225,9 @@ int madeira_get_vsync_locked(void) { return g_madeira_vsync_mode; }
+@@ -2185,6 +2247,9 @@ int madeira_get_vsync_locked(void) { return g_madeira_vsync_mode; }
  static NTSTATUS
  _MTLCommandBuffer_presentDrawable(void *obj) {
    struct unixcall_generic_obj_obj_noret *params = obj;
