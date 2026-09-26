@@ -26,3 +26,7 @@ int madeira_get_vsync_locked(void);
 
 /* ml526: startup phase timeline (Winios.m) */
 void winios_phase(const char *name);
+
+// Metal 4 self test (app/Madeira/Metal4SelfTest.m) -- runs the same harness the
+// layer is built from, on the device. Called only when explicitly requested.
+const char *madeira_metal4_selftest(void);

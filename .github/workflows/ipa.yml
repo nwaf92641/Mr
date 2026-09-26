@@ -347,6 +347,21 @@ jobs:
             app/Madeira/libdxmt_combined.a
           key: ${{ steps.dxmt-cache.outputs.cache-primary-key }}
 
+      # The app links libmr_metal4.a, so the archive has to exist before Xcode
+      # runs. Without this the reference in project.pbxproj is a claim and the
+      # link fails -- find it wherever the layer archived it rather than
+      # assuming a build directory, then check it is really there.
+      - name: Build and stage the Metal 4 layer for the app
+        run: |
+          tools/check-metal4.sh
+          found="$(find . -name libmr_metal4.a -not -path "./.git/*" | head -1)"
+          if [[ -z "$found" ]]; then
+            echo "no libmr_metal4.a produced; the app links it, so the link would fail"
+            exit 1
+          fi
+          cp "$found" app/libmr_metal4.a
+          ls -l app/libmr_metal4.a
+
       - name: Validate every link input before Xcode runs
         run: |
           set -euo pipefail
