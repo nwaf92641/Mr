@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+            A10000B0 /* Metal4SelfTest.m in Sources */ = {isa = PBXBuildFile; fileRef = A20000B0 /* Metal4SelfTest.m */; };
+            A10000B1 /* libmr_metal4.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A20000B1 /* libmr_metal4.a */; };
 		A1000001 /* MadeiraApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000001 /* MadeiraApp.swift */; };
 		A1000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000002 /* ContentView.swift */; };
 		A1000003 /* LogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000003 /* LogStore.swift */; };
@@ -69,6 +71,8 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+            A20000B0 /* Metal4SelfTest.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = Metal4SelfTest.m; sourceTree = "<group>"; };
+            A20000B1 /* libmr_metal4.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = libmr_metal4.a; path = "../../../libmr_metal4.a"; sourceTree = "<group>"; };
 		A2000001 /* MadeiraApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MadeiraApp.swift; sourceTree = "<group>"; };
 		A2000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A2000003 /* LogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogStore.swift; sourceTree = "<group>"; };
@@ -170,7 +174,8 @@
 				A1000091 /* libhogweed.a in Frameworks */,
 				A1000092 /* libnettle.a in Frameworks */,
 				A1000093 /* libgmp.a in Frameworks */,
-			);
+			
+                    A10000B1 /* libmr_metal4.a in Frameworks */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
@@ -235,7 +240,9 @@
 				A2000006 /* Madeira-Bridging-Header.h */,
 				A2000007 /* Madeira.entitlements */,
 				A2000008 /* Info.plist */,
-			);
+			
+                    A20000B0 /* Metal4SelfTest.m */,
+                    A20000B1 /* libmr_metal4.a */,);
 			path = Madeira;
 			sourceTree = "<group>";
 		};
@@ -381,7 +388,8 @@
 				A10000A7 /* SettingsView.swift in Sources */,
 				A10000A9 /* VirtualPadView.swift in Sources */,
 				A10000A8 /* VirtualPad.swift in Sources */,
-			);
+			
+                    A10000B0 /* Metal4SelfTest.m in Sources */,);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
@@ -459,6 +467,7 @@
 				DEVELOPMENT_TEAM = UT49TA9TA4;
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
+                                    "$(SRCROOT)/../graphics/metal4",
 					"$(inherited)",
 					"$(SRCROOT)/../FEX/FEXCore/include",
 					"$(SRCROOT)/../FEX/FEXHeaderUtils",
@@ -479,6 +488,7 @@
 					"@executable_path/Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = (
+                                    "$(SRCROOT)",
 					"$(inherited)",
 					"$(SRCROOT)/../FEX/build-ios/FEXCore/Source",
 					"$(SRCROOT)/../FEX/build-ios/External/fmt",
@@ -510,6 +520,7 @@
 				DEVELOPMENT_TEAM = UT49TA9TA4;
 				GENERATE_INFOPLIST_FILE = NO;
 				HEADER_SEARCH_PATHS = (
+                                    "$(SRCROOT)/../graphics/metal4",
 					"$(inherited)",
 					"$(SRCROOT)/../FEX/FEXCore/include",
 					"$(SRCROOT)/../FEX/FEXHeaderUtils",
@@ -530,6 +541,7 @@
 					"@executable_path/Frameworks",
 				);
 				LIBRARY_SEARCH_PATHS = (
+                                    "$(SRCROOT)",
 					"$(inherited)",
 					"$(SRCROOT)/../FEX/build-ios/FEXCore/Source",
 					"$(SRCROOT)/../FEX/build-ios/External/fmt",
