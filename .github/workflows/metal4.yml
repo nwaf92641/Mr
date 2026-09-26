@@ -76,3 +76,6 @@ jobs:
 
       - name: Compile the Metal 4 layer
         run: tools/check-metal4.sh
+
+      - name: Run the Metal 4 milestone harness on this GPU
+        run: tools/run-metal4-milestone.sh
