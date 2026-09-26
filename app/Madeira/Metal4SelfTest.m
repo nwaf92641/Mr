@@ -72,3 +72,57 @@ const char *madeira_metal4_selftest(void) {
   }
   return g_report;
 }
+
+/* Opt-in, checked here rather than from Swift.
+ *
+ * The first attempt put the trigger in Swift and referenced LogStore and this C
+ * symbol from another file, which scripts/typecheck-app.sh rejected: it compiles
+ * each Swift file on its own, so a file may only use what it defines. Marking the
+ * symbol @_silgen_name or reaching for dlsym would have worked around the gate
+ * rather than respected it, and the Swift side was never the point -- the stage
+ * table is.
+ *
+ * So the whole path lives in this file: the check, the run, and the output. A
+ * constructor runs it at load when explicitly asked, which needs no call site in
+ * any other file, and does nothing otherwise -- creating a Metal 4 device on
+ * every launch is how a diagnostic becomes a game launch bug.
+ *
+ * Two triggers, neither set by default:
+ *   --metal4-selftest                        launch argument
+ *   MadeiraMetal4SelfTest                    user default, bool
+ *
+ * The table goes to NSLog, which is what reaches a device log and Console.app,
+ * and madeira_metal4_selftest() stays available for a UI to call later. */
+static bool mr_metal4_selftest_requested(void) {
+  NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+  if ([defaults boolForKey:@"MadeiraMetal4SelfTest"]) {
+    return true;
+  }
+  for (NSString *argument in [[NSProcessInfo processInfo] arguments]) {
+    if ([argument isEqualToString:@"--metal4-selftest"]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+__attribute__((constructor)) static void mr_metal4_selftest_autorun(void) {
+  @autoreleasepool {
+    if (!mr_metal4_selftest_requested()) {
+      return;
+    }
+    const char *table = madeira_metal4_selftest();
+    NSLog(@"[metal4] self test");
+    if (table == NULL) {
+      NSLog(@"[metal4] no table returned");
+      return;
+    }
+    NSString *text = [NSString stringWithUTF8String:table];
+    for (NSString *line in [text componentsSeparatedByString:@"\n"]) {
+      if ([line length] > 0) {
+        NSLog(@"[metal4] %@", line);
+      }
+    }
+    NSLog(@"[metal4] self test done");
+  }
+}
