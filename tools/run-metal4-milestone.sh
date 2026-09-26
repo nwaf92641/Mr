@@ -72,15 +72,40 @@ echo "metal4-milestone: built"
 
 echo "metal4-milestone: --- running"
 set +e
-"$WORK/milestone"
-result=$?
+"$WORK/milestone" 2>&1 | tee "$WORK/report"
+result=${PIPESTATUS[0]}
 set -e
 
-echo "metal4-milestone: --- exit $result"
-case "$result" in
-    0) echo "metal4-milestone: every Metal 4 stage reached on this GPU";;
-    3) echo "metal4-milestone: no Metal 4 device here -- stages not executed";;
-    *) echo "metal4-milestone: a stage failed; the table above names it";;
-esac
+# The verdict comes from the harness's own report rather than from guessing what
+# its exit codes mean. It prints a row per stage, and the words are the contract:
+#
+#   FAIL  a stage was attempted and failed       -> red, and it names the stage
+#   SKIP  Metal 4 is not on this machine         -> not a pass, not a failure of
+#         the code, and deliberately not silent
+#   PASS  the stage happened on a real GPU
+#
+# So a build error stays red -- that is how the macOS 15 SDK problem surfaced --
+# while a runner without a Metal 4 GPU reports SKIP in plain words instead of
+# turning the compile gate red forever or, worse, reading as success.
+failures="$(grep -c '^  FAIL' "$WORK/report" || true)"
+skips="$(grep -c '^  SKIP' "$WORK/report" || true)"
+passes="$(grep -c '^  PASS' "$WORK/report" || true)"
+
+echo "metal4-milestone: --- exit $result, rows: $passes PASS, $skips SKIP, $failures FAIL"
+if [[ "$failures" != "0" ]]; then
+    echo "metal4-milestone: FAIL -- a stage failed; the table above names it"
+    exit 2
+fi
+if [[ "$result" != "0" && "$skips" == "0" ]]; then
+    echo "metal4-milestone: FAIL -- exit $result with no SKIP rows"
+    exit 2
+fi
+if [[ "$skips" != "0" ]]; then
+    echo "metal4-milestone: SKIPPED -- $skips stage rows skipped, $passes passed."
+    echo "metal4-milestone: this runner has no Metal 4 GPU, so the stages did not run."
+    echo "metal4-milestone: skipped is not passed; the compile gate is what this proves."
+    exit 0
+fi
+echo "metal4-milestone: every Metal 4 stage reached on this GPU"
 echo "metal4-milestone: this is the Metal 4 hop alone -- not FEX, Wine, D3D11 or DXMT"
-exit "$result"
+exit 0

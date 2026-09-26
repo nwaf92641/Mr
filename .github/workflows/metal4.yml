@@ -22,12 +22,16 @@ on:
     paths:
       - "graphics/metal4/**"
       - "tools/check-metal4.sh"
+      - "tools/run-metal4-milestone.sh"
+      - "tools/run-metal4-milestone.mm"
       - "build/dxmt-ios/build.sh"
       - ".github/workflows/metal4.yml"
   pull_request:
     paths:
       - "graphics/metal4/**"
       - "tools/check-metal4.sh"
+      - "tools/run-metal4-milestone.sh"
+      - "tools/run-metal4-milestone.mm"
       - "build/dxmt-ios/build.sh"
       - ".github/workflows/metal4.yml"
 
