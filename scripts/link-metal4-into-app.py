@@ -78,7 +78,7 @@ text = insert_once(
 refs = ("            %s /* %s */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; "
         "path = %s; sourceTree = \"<group>\"; };\n"
         "            %s /* %s */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; "
-        "name = %s; path = \"../../%s\"; sourceTree = \"<group>\"; };\n"
+        "name = %s; path = \"%s\"; sourceTree = \"<group>\"; };\n"
         % (SOURCE_REF, SOURCE_NAME, SOURCE_NAME, LIB_REF, LIB_NAME, LIB_NAME, LIB_PATH))
 text = insert_once(text, "/* Begin PBXFileReference section */\n", refs, "PBXFileReference")
 
@@ -89,7 +89,7 @@ def add_to_phase(text, isa, entry, what):
     if match is None:
         fail("could not find the %s files list" % what)
     body = match.group(1)
-    end = match.end(1)
+    end = match.start(1)
     return text[:end] + entry + text[end:]
 
 
@@ -112,7 +112,7 @@ if target_group is None:
     fail("could not find the group holding the app sources")
 entry = "\n                    %s /* %s */,\n                    %s /* %s */," % (
     SOURCE_REF, SOURCE_NAME, LIB_REF, LIB_NAME)
-text = text[:target_group.end(3)] + entry + text[target_group.end(3):]
+text = text[:target_group.start(3)] + entry + text[target_group.start(3):]
 
 # 5. Search paths, in every build configuration, so the header and the archive
 #    are found. Anchored on the setting name rather than on an indentation, which
