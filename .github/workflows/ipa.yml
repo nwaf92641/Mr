@@ -20,7 +20,7 @@ on:
     # proven pipeline on `main` (and PRs against it) and then publishes a
     # release. The `push` trigger below is unchanged.
   push:
-    branches: [jit-disconnect-hardening]
+    branches: [jit-disconnect-hardening, metal4/runtime-integration]
     paths:
       - ".github/workflows/ipa.yml"
       - "app/**"
