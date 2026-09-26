@@ -7,11 +7,17 @@ each holding the DLLs, .inf files and a catalog. Everything the component needs 
 a few levels in, and the only structure that matters here is the file names, so
 this walks the nesting and picks the names listed in tools/directx-component.txt.
 
-Input is either the redistributable itself (directx_Jun2010_redist.exe, an MSCF
-cabinet preceded by an SFX stub, so the cabinet is carved out at its signature) or
-an already-extracted .cab. Nested cab extraction uses cabextract, which is the
-only tool that reads Microsoft cabinets everywhere -- macOS has no built-in one
-and the CI runners have neither 7-Zip nor bsdtar guaranteed.
+Input is the redistributable itself (directx_Jun2010_redist.exe) or an
+already-extracted .cab. The redistributable is a self-extracting archive, but it
+is not "an MSCF cabinet preceded by a stub": the file carries byte sequences that
+read as MSCF without being cabinet headers, and carving at the first one produced
+a file that is not a cabinet -- 7-Zip's "Cannot open the file as [Cab] archive".
+So the file is handed to the extractor as it stands, because both cabextract and
+7-Zip read self-extracting cabinets, and carving is kept only as a fallback and
+only at offsets whose header is self-consistent. Nested cab extraction uses
+cabextract, which is the only tool that reads Microsoft cabinets everywhere --
+macOS has no built-in one and the CI runners have neither 7-Zip nor bsdtar
+guaranteed.
 
 Usage:
   python3 tools/extract-directx.py IN --out DIR [--sevenzip none] [--list]
@@ -26,6 +32,7 @@ from __future__ import annotations
 import argparse
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -84,24 +91,101 @@ def run(tool: list[str], args: list[str]) -> None:
         )
 
 
-def carve_cabinet(data: bytes, destination: Path) -> Path:
-    """A redistributable .exe is an SFX stub with the cabinet appended."""
+def cabinet_header_ok(data: bytes, index: int) -> bool:
+    """Whether a cabinet header at index is self-consistent.
+
+    The redistributable contains MSCF byte sequences that are not cabinet
+    headers. Two of them in the June 2010 file claim coffFiles well past the end
+    of the file, a spanned-part number in the hundreds and a file count in the
+    thousands -- carving there writes a file that no extractor will open, which
+    is the failure this check exists to prevent.
+    """
+    header = data[index : index + 24]
+    if len(header) < 24:
+        return False
+    (cb_cabinet, coff_files, _vmin, _vmaj, _c_folders, c_files, _flags, _set_id,
+     _i_cabinet) = struct.unpack("<IIBBHHHHH", header[4:24])
+    if c_files == 0:
+        return False
+    remaining = len(data) - index
+    if cb_cabinet > remaining:
+        return False
+    if cb_cabinet != 0 and coff_files >= cb_cabinet:
+        return False
+    return True
+
+
+def candidate_offsets(data: bytes) -> list[int]:
+    offsets: list[int] = []
     index = data.find(MSCF)
-    if index < 0:
-        raise SystemExit("error: input is neither a cabinet nor a self-extracting one")
-    destination.write_bytes(data[index:])
-    return destination
+    while index >= 0:
+        if cabinet_header_ok(data, index):
+            offsets.append(index)
+        index = data.find(MSCF, index + 1)
+    return offsets
+
+
+def extractor_args(tool: list[str], cabinet: Path, destination: Path) -> list[str]:
+    if tool[0].endswith("cabextract"):
+        return ["-q", "-s", "-d", str(destination), str(cabinet)]
+    if tool[0].endswith(("7z", "7zz")):
+        return ["x", "-y", f"-o{destination}", str(cabinet)]
+    return ["-xf", str(cabinet), "-C", str(destination)]
 
 
 def extract(cabinet: Path, destination: Path) -> None:
     tool = which_extractor()
     destination.mkdir(parents=True, exist_ok=True)
-    if tool[0].endswith("cabextract"):
-        run(tool, ["-q", "-s", "-d", str(destination), str(cabinet)])
-    elif tool[0].endswith(("7z", "7zz")):  # type: ignore[arg-type]
-        run(tool, ["x", "-y", f"-o{destination}", str(cabinet)])
-    else:
-        run(tool, ["-xf", str(cabinet), "-C", str(destination)])
+    run(tool, extractor_args(tool, cabinet, destination))
+
+
+def try_extract(cabinet: Path, destination: Path) -> bool:
+    """Extract if the tool accepts the file, and say whether it produced anything.
+
+    Used to test a candidate rather than to commit to one: an extractor that
+    rejects a file returns non-zero, and one that accepts it and yields nothing
+    has still not found the payload.
+    """
+    tool = which_extractor()
+    destination.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(tool + extractor_args(tool, cabinet, destination),
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        return False
+    return any(destination.iterdir())
+
+
+def open_top(source: Path, work: Path) -> Path:
+    """Return a directory holding the redistributable's first level.
+
+    The input is tried as it stands first. Preferring it is not an optimisation:
+    it is the only approach that does not depend on knowing where a cabinet
+    begins in the file, and both extractors read self-extracting archives.
+
+    Carving is the fallback, at offsets whose header is self-consistent, and each
+    candidate has to extract to be accepted -- so a wrong offset costs a temp
+    directory instead of the whole step.
+    """
+    direct = work / "direct"
+    if try_extract(source, direct):
+        return direct
+
+    data = source.read_bytes()
+    offsets = candidate_offsets(data)
+    for index in offsets:
+        carved = work / f"payload-{index}.cab"
+        carved.write_bytes(data[index:])
+        target = work / f"carved-{index}"
+        if try_extract(carved, target):
+            print(f"  carved the cabinet at offset {index}")
+            return target
+
+    raise SystemExit(
+        "error: no cabinet in this redistributable could be opened.\n"
+        "       Tried the file as given and every self-consistent MSCF header at "
+        f"offset(s): {offsets or 'none found'}.\n"
+        "       A file that is not the June 2010 redistributable will land here; "
+        "set DIRECTX_URL or DIRECTX_INSTALLER to the right one.")
 
 
 def flatten_cabinets(root: Path) -> tuple[list[Path], list[Path]]:
@@ -162,12 +246,8 @@ def main() -> int:
             "\n  DXMT's module -- and the Metal backend with it.")
     work = Path(tempfile.mkdtemp(prefix="directx-"))
     try:
-        source = args.input
-        head = args.input.read_bytes()[:2]
-        if head == b"MZ":
-            source = carve_cabinet(args.input.read_bytes(), work / "payload.cab")
-        extract(source, work / "top")
-        files, _ = flatten_cabinets(work / "top")
+        top = open_top(args.input, work)
+        files, _ = flatten_cabinets(top)
 
         by_name: dict[str, Path] = {}
         for path in files:
