@@ -197,3 +197,13 @@ echo "check-metal4: --- compute copy selectors, verbatim"
 sed -n "140,275p" "$compute_header" 2>/dev/null || true
 echo "check-metal4: --- compute fill mipmap bytes"
 sed -n "440,565p" "$compute_header" 2>/dev/null || true
+
+# D3D12 has no front end in this tree. Apple has one, so probe for it and guard
+# the licence rather than assert either way.
+if ! "$ROOT/tools/check-d3d12-path.sh"; then
+    status=1
+fi
+
+# The gates above only fail the job if the status reaches the exit, and the lines
+# after them were appended, so the exit has to come last and say so explicitly.
+exit "$status"
