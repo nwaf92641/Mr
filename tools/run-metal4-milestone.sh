@@ -21,11 +21,32 @@ set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-SDK="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+# The macOS SDK has to come from an Xcode that has one, and on this runner the
+# default does not: `xcrun --sdk macosx` resolves to MacOSX15.5.sdk, which has no
+# Metal 4 at all -- no MTLGPUFamilyMetal4, no MTL4CommandQueue -- so the harness
+# failed to build and reported that, which is how a runtime check earns its
+# place. The Xcode that compiles the layer against iPhoneOS 26.2 is the one to
+# use, so pick the Xcode carrying a macOS 26 SDK rather than trusting the
+# default.
+XCODE_DEVELOPER=""
+SDK=""
+for app in /Applications/Xcode*.app; do
+    [[ -d "$app" ]] || continue
+    candidate="$(ls -d "$app"/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26*.sdk 2>/dev/null | tail -1)"
+    if [[ -n "$candidate" ]]; then
+        XCODE_DEVELOPER="$app/Contents/Developer"
+        SDK="$candidate"
+    fi
+done
+
 if [[ -z "$SDK" ]]; then
-    echo "metal4-milestone: SKIP -- no macOS SDK on this machine"
+    echo "metal4-milestone: SKIP -- no Xcode on this machine has a macOS 26 SDK,"
+    echo "metal4-milestone:         and Metal 4 needs one; a macOS 15 SDK has no"
+    echo "metal4-milestone:         MTLGPUFamilyMetal4 and no MTL4CommandQueue"
     exit 3
 fi
+export DEVELOPER_DIR="$XCODE_DEVELOPER"
+echo "metal4-milestone: --- toolchain $DEVELOPER_DIR"
 
 if ! xcrun --sdk macosx --find clang++ >/dev/null 2>&1; then
     echo "metal4-milestone: SKIP -- no clang++ for macOS"
