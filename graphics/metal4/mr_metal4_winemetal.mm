@@ -69,6 +69,7 @@ struct State {
   mr_mtl4_table *fragment_table;
   mr_mtl4_table *object_table;
   mr_mtl4_table *mesh_table;
+  mr_mtl4_table *compute_table;
   mr_mtl4_transient *transient;
   mr_mtl4_residency *residency;
   uint32_t untranslated; /* types with no translation, reported once each */
@@ -807,6 +808,7 @@ struct Session {
   mr_mtl4_table *fragment_table;
   mr_mtl4_table *object_table;
   mr_mtl4_table *mesh_table;
+  mr_mtl4_table *compute_table;
   mr_mtl4_transient *transient;
   mr_mtl4_residency *residency;
   mr_mtl4_frame *frames[kMaxFrames];
@@ -855,6 +857,8 @@ Session &start_session() {
       mr_mtl4_device_new_table(state.device, 32, 0, 0, MR_MTL4_STAGE_OBJECT, true);
   state.mesh_table =
       mr_mtl4_device_new_table(state.device, 32, 0, 0, MR_MTL4_STAGE_MESH, true);
+  state.compute_table =
+      mr_mtl4_device_new_table(state.device, 32, 128, 16, MR_MTL4_STAGE_COMPUTE, false);
   state.transient = mr_mtl4_transient_create(mr_mtl4_device_metal_device(state.device), 4u << 20);
   /* Attached to the queue, so every frame's draws see it. The capacity has to
    * cover every distinct resource a frame touches, not every binding. */
@@ -867,7 +871,7 @@ Session &start_session() {
   }
   if (state.vertex_table == nullptr || state.fragment_table == nullptr ||
       state.object_table == nullptr || state.mesh_table == nullptr ||
-      state.transient == nullptr) {
+      state.compute_table == nullptr || state.transient == nullptr) {
     fprintf(stderr, "[mr-mtl4] session start failed: %s\n", mr_mtl4_last_error());
     state.failed = true;
   }
@@ -1040,7 +1044,7 @@ bool mr_mtl4_wmt_session_compute_encode(uint64_t encoder, const void *cmd_head) 
   if (index >= kMaxEncoders || !state.encoder_live[index]) {
     return false;
   }
-  mr_mtl4_wmt_encode_compute((__bridge void *)state.encoder_object[index], state.object_table,
+  mr_mtl4_wmt_encode_compute((__bridge void *)state.encoder_object[index], state.compute_table,
                              state.transient, state.residency, cmd_head);
   return true;
 }
@@ -1347,6 +1351,16 @@ uint32_t mr_mtl4_wmt_encode_compute(void *mtl4_compute_encoder, mr_mtl4_table *t
     return 0;
   }
   __unsafe_unretained id encoder = (__bridge id)mtl4_compute_encoder;
+  if (table == nullptr) {
+    fprintf(stderr, "[mr-mtl4] compute encode with no argument table -- nothing encoded\n");
+    return 0;
+  }
+  /* MTL4ComputeCommandEncoder.h:572 declares setArgumentTable: with the table
+   * alone -- no stages argument -- so the encoder decides where the table
+   * applies. Without this call every SetBuffer and SetTexture below was written
+   * into a table that no encoder was reading. */
+  [(id<MTL4ComputeCommandEncoder>)encoder
+      setArgumentTable:(__bridge id<MTL4ArgumentTable>)mr_mtl4_table_metal_table(table)];
   uint32_t translated = 0;
   for (const struct wmtcmd_base *command = (const struct wmtcmd_base *)cmd_head; command != nullptr;
        command = (const struct wmtcmd_base *)command->next.ptr) {

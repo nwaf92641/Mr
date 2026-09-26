@@ -55,5 +55,25 @@ print('check-metal4-enum: %d of %d render command types translated (%d reserved 
 for name in missing:
     print('check-metal4-enum:   not translated: %s (id %d)' % (name, names.index(name)))
 
+def scoped(enum_name, signature, label):
+    block = re.search(r'enum ' + enum_name + r'\s*:\s*\w+\s*\{(.*?)\}', header, re.S)
+    if block is None:
+        sys.exit(enum_name + ' not found in winemetal.h')
+    names = [e.split('=')[0].strip() for e in block.group(1).split(',')]
+    names = [n for n in names if n and not n.startswith('//')]
+    start = bridge.find(signature)
+    if start == -1:
+        sys.exit('walker not found for ' + label + ': ' + signature)
+    body = bridge[start:start + 20000]
+    gone = [n for n in names if ('case ' + n + ':') not in body]
+    print('check-metal4-enum: %s: %d of %d translated' % (label, len(names) - len(gone), len(names)))
+    for name in gone:
+        print('check-metal4-enum:   %s not translated: %s' % (label, name))
+    return gone
+
+blit_missing = scoped('WMTBlitCommandType', 'bool blit_one(', 'blit')
+compute_missing = scoped('WMTComputeCommandType', 'uint32_t mr_mtl4_wmt_encode_compute(', 'compute')
+missing = missing + blit_missing + compute_missing
+
 if missing and strict:
-    sys.exit('check-metal4-enum: %d untranslated' % len(missing))
+    sys.exit('check-metal4-enum: %d untranslated across render, blit and compute' % len(missing))

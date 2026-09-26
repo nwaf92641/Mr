@@ -57,6 +57,7 @@ typedef enum {
   MR_MTL4_STAGE_TILE = 1u << 2,
   MR_MTL4_STAGE_OBJECT = 1u << 3,
   MR_MTL4_STAGE_MESH = 1u << 4,
+  MR_MTL4_STAGE_COMPUTE = 1u << 5,
 } mr_mtl4_stage;
 
 typedef struct mr_mtl4_device mr_mtl4_device;                 /* id<MTLDevice>            */
