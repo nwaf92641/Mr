@@ -61,6 +61,17 @@ BUNDLE="${PE_MODULES_OUT:-$REPO_ROOT/app/Madeira}"
 MANIFEST="$REPO_ROOT/tools/pe-module-manifest.txt"
 PATCH_DIR="$REPO_ROOT/patches"
 MINGW="$REPO_ROOT/toolchains/llvm-mingw-20260421-ucrt-macos-universal"
+
+# Wine's generated Makefile names the cross compilers bare -- a run on a machine
+# without the PE cache says `make: arm64ec-w64-mingw32-clang: No such file or
+# directory` -- so the toolchain directory has to be on PATH for the make
+# invocations below. prepare-wine-ios.sh exports PATH for its own process, and a
+# GitHub step is a fresh shell, so that export does not reach this script. Every
+# check in here uses an absolute "$MINGW/bin/..." path and passed while make
+# could not find the compiler, which is the shape of exactly that mistake.
+if [[ -d "$MINGW/bin" ]]; then
+    export PATH="$MINGW/bin:$PATH"
+fi
 ARCHS=(arm64ec-windows aarch64-windows)
 JOBS="${JOBS:-3}"
 
